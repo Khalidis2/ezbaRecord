@@ -9,10 +9,10 @@ TOKEN = os.environ.get("BOT_TOKEN")
 DB_NAME = "azba_expenses.db"
 
 ALLOWED_USERS = [
-    47329648,  # انت
-    222222222,  # ولدك
-    333333333,  # عامل 1
-    444444444   # عامل 2
+    47329648,
+    222222222,
+    333333333,
+    444444444
 ]
 
 def init_db():
@@ -76,7 +76,7 @@ def authorized(update):
     return update.message.from_user.id in ALLOWED_USERS
 
 def help_command(update, context):
-    if not authorized(update): 
+    if not authorized(update):
         update.message.reply_text("❌ غير مصرح لك")
         return
     update.message.reply_text(
@@ -91,7 +91,7 @@ def help_command(update, context):
     )
 
 def today_report(update, context):
-    if not authorized(update): 
+    if not authorized(update):
         update.message.reply_text("❌ غير مصرح لك")
         return
     today = datetime.now().date().isoformat()
@@ -103,7 +103,7 @@ def today_report(update, context):
     update.message.reply_text(f"📅 مجموع اليوم: {total}")
 
 def week_report(update, context):
-    if not authorized(update): 
+    if not authorized(update):
         update.message.reply_text("❌ غير مصرح لك")
         return
     today = datetime.now().date()
@@ -145,36 +145,21 @@ def main():
     if not TOKEN:
         raise RuntimeError("BOT_TOKEN is not set")
 
-    # debug prints + support polling mode for hosting (RUN_MODE=local)
+    print("DEBUG: starting bot")
     print("DEBUG: BOT_TOKEN present?", bool(TOKEN))
-    print("DEBUG: RUN_MODE =", os.environ.get("RUN_MODE"))
     print("DEBUG: ALLOWED_USERS =", ALLOWED_USERS)
 
-    # If you set RUN_MODE=local (in Railway Variables), use polling (no webhooks, no ports).
-    if os.environ.get("RUN_MODE") == "local":
-        updater.start_polling()
-        print("DEBUG: start_polling called")
-        updater.idle()
-        return
+    updater = Updater(TOKEN, use_context=True)
+    dp = updater.dispatcher
 
-    # Otherwise fall back to webhook mode (requires BASE_URL and allowed port)
-    port = int(os.environ.get("PORT", "8443"))
-    base_url = os.environ.get("BASE_URL")
-    if not base_url:
-        raise RuntimeError("BASE_URL is not set")
+    dp.add_handler(CommandHandler("help", help_command))
+    dp.add_handler(CommandHandler("today", today_report))
+    dp.add_handler(CommandHandler("week", week_report))
+    dp.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
 
-    webhook_url = f"{base_url}/{TOKEN}"
-
-    print("DEBUG: webhook_url =", webhook_url, "PORT =", port)
-    updater.start_webhook(
-        listen="0.0.0.0",
-        port=port,
-        url_path=TOKEN,
-    )
-    updater.bot.set_webhook(webhook_url)
-    print("DEBUG: webhook set")
+    updater.start_polling()
+    print("DEBUG: start_polling called")
     updater.idle()
-
 
 if __name__ == "__main__":
     main()
