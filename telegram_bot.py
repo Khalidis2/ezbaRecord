@@ -9,10 +9,7 @@ TOKEN = os.environ.get("BOT_TOKEN")
 DB_NAME = "azba_expenses.db"
 
 ALLOWED_USERS = [
-    111111111,  # انت
-    222222222,  # ولدك
-    333333333,  # عامل 1
-    444444444   # عامل 2
+    47329648,  # انت
 ]
 
 def init_db():
