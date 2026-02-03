@@ -13,17 +13,25 @@ SHEET_ID = os.environ.get("SHEET_ID")
 GOOGLE_SERVICE_ACCOUNT_JSON = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
 
 ALLOWED_USERS = [
-    47329648,
-    222222222,
-    333333333,
-    444444444
+    47329648,   # انت
+    222222222,  # ولدك
+    333333333,  # عامل 1
+    444444444   # عامل 2
 ]
+
+# أسماء الأشخاص حسب اليوزر آي دي
+USER_NAMES = {
+    47329648: "Khaled",
+    222222222: "الولد",
+    333333333: "عامل 1",
+    444444444: "عامل 2",
+}
 
 def get_sheet():
     info = json.loads(GOOGLE_SERVICE_ACCOUNT_JSON)
     scopes = [
         "https://www.googleapis.com/auth/spreadsheets",
-        "https://www.googleapis.com/auth/drive"
+        "https://www.googleapis.com/auth/drive",
     ]
     creds = Credentials.from_service_account_info(info, scopes=scopes)
     client = gspread.authorize(creds)
@@ -57,7 +65,6 @@ def parse_expense(text):
         "type": detect_type(text),
         "amount": float(m.group(1).replace(",", ".")),
         "note": text,
-        "raw_text": text
     }
 
 def authorized(update):
@@ -71,31 +78,49 @@ def help_command(update, context):
         "📋 أوامر البوت:\n\n"
         "✍️ تسجيل مصروف:\n"
         "اكتب مثل:\n"
-        "اشتريت علف 350 اليوم\n\n"
+        "اشتريت علف 200 اليوم\n\n"
+        "النتيجة تنحفظ في Google Sheets مع اسم الشخص.\n\n"
         "/help - المساعدة"
     )
 
 def handle_message(update, context):
+    user_id = update.message.from_user.id
+
     if not authorized(update):
         update.message.reply_text("❌ غير مصرح لك")
         return
 
-    exp = parse_expense(update.message.text)
+    text = update.message.text
+    exp = parse_expense(text)
     if not exp:
-        update.message.reply_text("❌ اكتب مبلغ واضح")
+        update.message.reply_text("❌ اكتب مبلغ واضح، مثال: اشتريت علف 200 اليوم")
         return
 
-    sheet = get_sheet()
-    sheet.append_row([
-        exp["date"],
-        exp["type"],
-        exp["amount"],
-        exp["note"],
-        exp["raw_text"],
-        str(update.message.from_user.id)
-    ], value_input_option="USER_ENTERED")
+    person_name = USER_NAMES.get(user_id, str(user_id))
 
-    update.message.reply_text("✅ تم التسجيل في Google Sheets")
+    try:
+        sheet = get_sheet()
+        # الأعمدة: date | type | amount | note | person
+        sheet.append_row(
+            [
+                exp["date"],
+                exp["type"],
+                exp["amount"],
+                exp["note"],
+                person_name,
+            ],
+            value_input_option="USER_ENTERED",
+        )
+        update.message.reply_text(
+            f"✅ تم التسجيل في Google Sheets\n"
+            f"النوع: {exp['type']}\n"
+            f"المبلغ: {exp['amount']}\n"
+            f"التاريخ: {exp['date']}\n"
+            f"الشخص: {person_name}"
+        )
+    except Exception as e:
+        print("ERROR saving to sheet:", e)
+        update.message.reply_text("❌ صار خطأ أثناء الحفظ في Google Sheets")
 
 def main():
     if not TOKEN:
