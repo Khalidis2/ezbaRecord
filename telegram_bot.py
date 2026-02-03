@@ -10,6 +10,9 @@ DB_NAME = "azba_expenses.db"
 
 ALLOWED_USERS = [
     47329648,  # انت
+    222222222,  # ولدك
+    333333333,  # عامل 1
+    444444444   # عامل 2
 ]
 
 def init_db():
@@ -48,7 +51,7 @@ def detect_type(text):
     return "اخرى"
 
 def parse_expense(text):
-    m = re.search(r"(\\d+(?:[\\.,]\\d+)?)", text)
+    m = re.search(r"(\d+(?:[.,]\d+)?)", text)
     if not m:
         return None
     return {
@@ -73,7 +76,9 @@ def authorized(update):
     return update.message.from_user.id in ALLOWED_USERS
 
 def help_command(update, context):
-    if not authorized(update): return
+    if not authorized(update): 
+        update.message.reply_text("❌ غير مصرح لك")
+        return
     update.message.reply_text(
         "📋 أوامر البوت:\n\n"
         "✍️ تسجيل مصروف:\n"
@@ -86,7 +91,9 @@ def help_command(update, context):
     )
 
 def today_report(update, context):
-    if not authorized(update): return
+    if not authorized(update): 
+        update.message.reply_text("❌ غير مصرح لك")
+        return
     today = datetime.now().date().isoformat()
     conn = sqlite3.connect(DB_NAME)
     cur = conn.cursor()
@@ -96,7 +103,9 @@ def today_report(update, context):
     update.message.reply_text(f"📅 مجموع اليوم: {total}")
 
 def week_report(update, context):
-    if not authorized(update): return
+    if not authorized(update): 
+        update.message.reply_text("❌ غير مصرح لك")
+        return
     today = datetime.now().date()
     start = (today - timedelta(days=6)).isoformat()
     end = today.isoformat()
@@ -132,13 +141,32 @@ def handle_message(update, context):
 
 def main():
     init_db()
+
+    if not TOKEN:
+        raise RuntimeError("BOT_TOKEN is not set")
+
     updater = Updater(TOKEN, use_context=True)
     dp = updater.dispatcher
+
     dp.add_handler(CommandHandler("help", help_command))
     dp.add_handler(CommandHandler("today", today_report))
     dp.add_handler(CommandHandler("week", week_report))
     dp.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
-    updater.start_polling()
+
+    port = int(os.environ.get("PORT", "8443"))
+    base_url = os.environ.get("BASE_URL")
+    if not base_url:
+        raise RuntimeError("BASE_URL is not set")
+
+    webhook_url = f"{base_url}/{TOKEN}"
+
+    updater.start_webhook(
+        listen="0.0.0.0",
+        port=port,
+        url_path=TOKEN,
+    )
+    updater.bot.set_webhook(webhook_url)
+
     updater.idle()
 
 if __name__ == "__main__":
