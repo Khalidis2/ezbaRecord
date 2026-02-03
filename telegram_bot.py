@@ -2,7 +2,7 @@
 import re
 import os
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 
 import gspread
 from google.oauth2.service_account import Credentials
@@ -19,7 +19,6 @@ ALLOWED_USERS = [
     444444444   # عامل 2
 ]
 
-# أسماء الأشخاص حسب اليوزر آي دي
 USER_NAMES = {
     47329648: "Khaled",
     222222222: "الولد",
@@ -74,13 +73,18 @@ def help_command(update, context):
     if not authorized(update):
         update.message.reply_text("❌ غير مصرح لك")
         return
+
     update.message.reply_text(
         "📋 أوامر البوت:\n\n"
         "✍️ تسجيل مصروف:\n"
-        "اكتب مثل:\n"
-        "اشتريت علف 200 اليوم\n\n"
-        "النتيجة تنحفظ في Google Sheets مع اسم الشخص.\n\n"
-        "/help - المساعدة"
+        "– اكتب جملة فيها رقم\n"
+        "  مثال: اشتريت علف 200 اليوم\n\n"
+        "📊 التقارير من الشيت:\n"
+        "– /week   مجموع مصاريف آخر 7 أيام\n"
+        "– /month  مجموع مصاريف هذا الشهر\n"
+        "– /status ملخص سريع: اليوم + الأسبوع + الشهر\n\n"
+        "ℹ️ أخرى:\n"
+        "– /help   عرض هذه القائمة"
     )
 
 def handle_message(update, context):
@@ -100,7 +104,7 @@ def handle_message(update, context):
 
     try:
         sheet = get_sheet()
-        # الأعمدة: date | type | amount | note | person
+        # الأعمدة في الشيت: date | type | amount | note | person
         sheet.append_row(
             [
                 exp["date"],
@@ -112,7 +116,7 @@ def handle_message(update, context):
             value_input_option="USER_ENTERED",
         )
         update.message.reply_text(
-            f"✅ تم التسجيل في Google Sheets\n"
+            f"✅ تم تسجيل المصروف\n"
             f"النوع: {exp['type']}\n"
             f"المبلغ: {exp['amount']}\n"
             f"التاريخ: {exp['date']}\n"
@@ -121,6 +125,87 @@ def handle_message(update, context):
     except Exception as e:
         print("ERROR saving to sheet:", e)
         update.message.reply_text("❌ صار خطأ أثناء الحفظ في Google Sheets")
+
+# ====== قراءة البيانات من Google Sheets للتقارير ======
+
+def load_expenses():
+    """ترجع قائمة مصاريف من الشيت كـ تواريخ + مبالغ."""
+    sheet = get_sheet()
+    rows = sheet.get_all_values()
+    expenses = []
+
+    for row in rows[1:]:  # تخطي العنوان
+        if len(row) < 3:
+            continue
+        date_str = row[0].strip()
+        amount_str = row[2].strip()
+
+        if not date_str or not amount_str:
+            continue
+
+        try:
+            d = datetime.strptime(date_str[:10], "%Y-%m-%d").date()
+            amount = float(str(amount_str).replace(",", ""))
+        except Exception:
+            continue
+
+        expenses.append({"date": d, "amount": amount})
+
+    return expenses
+
+def week_report(update, context):
+    if not authorized(update):
+        update.message.reply_text("❌ غير مصرح لك")
+        return
+
+    today = datetime.now().date()
+    start = today - timedelta(days=6)
+    expenses = load_expenses()
+    total = sum(e["amount"] for e in expenses if start <= e["date"] <= today)
+
+    update.message.reply_text(
+        f"📊 تقرير الأسبوع (من {start} إلى {today}):\n"
+        f"إجمالي المصاريف: {total}"
+    )
+
+def month_report(update, context):
+    if not authorized(update):
+        update.message.reply_text("❌ غير مصرح لك")
+        return
+
+    today = datetime.now().date()
+    start = date(today.year, today.month, 1)
+    expenses = load_expenses()
+    total = sum(e["amount"] for e in expenses if start <= e["date"] <= today)
+
+    update.message.reply_text(
+        f"📊 تقرير الشهر ({today.year}-{today.month:02d}):\n"
+        f"إجمالي المصاريف: {total}"
+    )
+
+def status_report(update, context):
+    if not authorized(update):
+        update.message.reply_text("❌ غير مصرح لك")
+        return
+
+    today = datetime.now().date()
+    week_start = today - timedelta(days=6)
+    month_start = date(today.year, today.month, 1)
+    expenses = load_expenses()
+
+    total_today = sum(e["amount"] for e in expenses if e["date"] == today)
+    total_week = sum(e["amount"] for e in expenses if week_start <= e["date"] <= today)
+    total_month = sum(e["amount"] for e in expenses if month_start <= e["date"] <= today)
+
+    update.message.reply_text(
+        "📈 ملخص المصاريف:\n"
+        f"اليوم ({today}): {total_today}\n"
+        f"آخر 7 أيام: {total_week}\n"
+        f"هذا الشهر: {total_month}\n\n"
+        "ملاحظة: هذه الأرقام للمصاريف فقط، لو حاب نحسب الربح/الخسارة نقدر نضيف تسجيل للدخل لاحقًا."
+    )
+
+# ====== main ======
 
 def main():
     if not TOKEN:
@@ -134,6 +219,9 @@ def main():
     dp = updater.dispatcher
 
     dp.add_handler(CommandHandler("help", help_command))
+    dp.add_handler(CommandHandler("week", week_report))
+    dp.add_handler(CommandHandler("month", month_report))
+    dp.add_handler(CommandHandler("status", status_report))
     dp.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
 
     updater.start_polling()
