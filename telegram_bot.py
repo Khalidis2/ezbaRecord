@@ -58,9 +58,9 @@ def detect_type(text):
         return "عمال"
     if any(k in text for k in ["دواء", "علاج", "بيطري"]):
         return "علاج"
-    if any(k in text for k in ["كهرب", "مولد"]):
+    if any(k in text for k in ["كهرب", "مولد", "كهرباء"]):
         return "كهرباء"
-    if any(k in text for k in ["مويه", "ماء"]):
+    if any(k in text for k in ["مويه", "ماء", "ماي"]):
         return "ماء"
     return "اخرى"
 
