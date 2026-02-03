@@ -145,14 +145,19 @@ def main():
     if not TOKEN:
         raise RuntimeError("BOT_TOKEN is not set")
 
-    updater = Updater(TOKEN, use_context=True)
-    dp = updater.dispatcher
+    # debug prints + support polling mode for hosting (RUN_MODE=local)
+    print("DEBUG: BOT_TOKEN present?", bool(TOKEN))
+    print("DEBUG: RUN_MODE =", os.environ.get("RUN_MODE"))
+    print("DEBUG: ALLOWED_USERS =", ALLOWED_USERS)
 
-    dp.add_handler(CommandHandler("help", help_command))
-    dp.add_handler(CommandHandler("today", today_report))
-    dp.add_handler(CommandHandler("week", week_report))
-    dp.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
+    # If you set RUN_MODE=local (in Railway Variables), use polling (no webhooks, no ports).
+    if os.environ.get("RUN_MODE") == "local":
+        updater.start_polling()
+        print("DEBUG: start_polling called")
+        updater.idle()
+        return
 
+    # Otherwise fall back to webhook mode (requires BASE_URL and allowed port)
     port = int(os.environ.get("PORT", "8443"))
     base_url = os.environ.get("BASE_URL")
     if not base_url:
@@ -160,14 +165,16 @@ def main():
 
     webhook_url = f"{base_url}/{TOKEN}"
 
+    print("DEBUG: webhook_url =", webhook_url, "PORT =", port)
     updater.start_webhook(
         listen="0.0.0.0",
         port=port,
         url_path=TOKEN,
     )
     updater.bot.set_webhook(webhook_url)
-
+    print("DEBUG: webhook set")
     updater.idle()
+
 
 if __name__ == "__main__":
     main()
