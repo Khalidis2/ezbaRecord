@@ -76,7 +76,7 @@ def authorized(update):
     return update.message.from_user.id in ALLOWED_USERS
 
 def help_command(update, context):
-    if not authorized(update): 
+    if not authorized(update):
         update.message.reply_text("❌ غير مصرح لك")
         return
     update.message.reply_text(
@@ -91,7 +91,7 @@ def help_command(update, context):
     )
 
 def today_report(update, context):
-    if not authorized(update): 
+    if not authorized(update):
         update.message.reply_text("❌ غير مصرح لك")
         return
     today = datetime.now().date().isoformat()
@@ -103,7 +103,7 @@ def today_report(update, context):
     update.message.reply_text(f"📅 مجموع اليوم: {total}")
 
 def week_report(update, context):
-    if not authorized(update): 
+    if not authorized(update):
         update.message.reply_text("❌ غير مصرح لك")
         return
     today = datetime.now().date()
@@ -153,6 +153,13 @@ def main():
     dp.add_handler(CommandHandler("week", week_report))
     dp.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
 
+    # تشغيل عادي (polling) لو شغلت السكربت محليًا
+    if os.environ.get("RUN_MODE") == "local":
+        updater.start_polling()
+        updater.idle()
+        return
+
+    # Webhook لو شغَّلته على Render Web Service
     port = int(os.environ.get("PORT", "8443"))
     base_url = os.environ.get("BASE_URL")
     if not base_url:
@@ -166,7 +173,6 @@ def main():
         url_path=TOKEN,
     )
     updater.bot.set_webhook(webhook_url)
-
     updater.idle()
 
 if __name__ == "__main__":
