@@ -1,4 +1,6 @@
 python-telegram-bot==13.15
-openai>=1.6.0
-gspread
+requests
 google-auth
+gspread
+openai
+Flask  # not required by this snippet but ok to keep
