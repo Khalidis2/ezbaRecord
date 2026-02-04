@@ -7,15 +7,14 @@ from datetime import datetime, timedelta, date
 import gspread
 from google.oauth2.service_account import Credentials
 from telegram.ext import Updater, MessageHandler, Filters, CommandHandler
-import openai
+from openai import OpenAI
 
 TOKEN = os.environ.get("BOT_TOKEN")
 SHEET_ID = os.environ.get("SHEET_ID")
 GOOGLE_SERVICE_ACCOUNT_JSON = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 
-if OPENAI_API_KEY:
-    openai.api_key = OPENAI_API_KEY
+client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
 ALLOWED_USERS = [
     47329648,
@@ -129,7 +128,7 @@ def process_command(update, context):
 
 
 def ai_analyze_message(text, user_id):
-    if not OPENAI_API_KEY:
+    if not client:
         return None
 
     person_name = USER_NAMES.get(user_id, "مستخدم")
@@ -137,36 +136,27 @@ def ai_analyze_message(text, user_id):
     today = datetime.now().date().isoformat()
 
     system_instructions = (
-        "أنت مساعد مالي لمزرعة وغنم. مهمتك تحويل أي رسالة إلى JSON واحد فقط بدون أي نص إضافي.\n"
-        "الهدف هو تسجيل العمليات في Google Sheets.\n\n"
-        "أخرج دائمًا JSON بهذا الشكل:\n"
+        "أنت مساعد مالي لمزرعة وغنم.\n"
+        "مهمتك: تحويل الرسالة إلى JSON واحد فقط بدون أي نص إضافي.\n"
+        "الشكل المطلوب:\n"
         "{\n"
-        '  "should_save": true أو false,\n'
-        '  "date": "YYYY-MM-DD",\n'
-        '  "process": "شراء" أو "بيع" أو "فاتورة" أو "راتب" أو "أخرى",\n'
-        '  "type": "علف" أو "عمال" أو "علاج" أو "كهرباء" أو "ماء" أو "اخرى",\n'
-        '  "amount": رقم عشري (بدون نص),\n'
-        '  "note": "النص الأصلي أو وصف مختصر"\n'
+        '  \"should_save\": true أو false,\n'
+        '  \"date\": \"YYYY-MM-DD\",\n'
+        '  \"process\": \"شراء\" أو \"بيع\" أو \"فاتورة\" أو \"راتب\" أو \"أخرى\",\n'
+        '  \"type\": \"علف\" أو \"عمال\" أو \"علاج\" أو \"كهرباء\" أو \"ماء\" أو \"اخرى\",\n'
+        '  \"amount\": رقم عشري (بدون نص),\n'
+        '  \"note\": \"النص الأصلي أو وصف مختصر\"\n'
         "}\n\n"
-        "إذا لم تكن الرسالة عن عملية مالية (شراء/بيع/فاتورة/راتب/مصروف)، اجعل should_save = false.\n\n"
-        "تفسير التاريخ:\n"
-        f"- إذا قال اليوم أو ما ذكر تاريخ، استخدم تاريخ اليوم: {today}\n"
-        "- إذا قال أمس أو امس، اجعل التاريخ تاريخ أمس.\n"
-        "- إذا ذكر تاريخ صريح، استخدمه بصيغة YYYY-MM-DD.\n\n"
-        "نوع العملية process:\n"
-        "- شراء: عند شراء شيء للمزرعة أو العلف أو أغراض.\n"
-        "- بيع: عند بيع غنم أو علف أو أي شيء.\n"
-        "- فاتورة: كهرباء، ماء، صيانة، فواتير.\n"
-        "- راتب: رواتب العمال.\n"
-        "- أخرى: أي شيء آخر.\n\n"
+        "إذا لم تكن الرسالة عن عملية مالية فليكن should_save = false.\n\n"
+        "التاريخ:\n"
+        f"- إذا لم يذكر تاريخ أو قال اليوم → استخدم تاريخ اليوم: {today}\n"
+        "- إذا قال أمس/امس → استخدم تاريخ أمس.\n"
+        "- إذا ذكر تاريخ صريح → استخدمه بصيغة YYYY-MM-DD.\n\n"
+        "process:\n"
+        "- شراء، بيع، فاتورة، راتب، أخرى.\n\n"
         "type:\n"
-        "- علف: علف، شعير، برسيم، تبن.\n"
-        "- عمال: رواتب العمال أو مصاريف متعلقة بهم.\n"
-        "- علاج: دواء، علاج، بيطري.\n"
-        "- كهرباء: كهرب، مولد.\n"
-        "- ماء: ماء، مويه.\n"
-        "- اخرى: غير ذلك.\n\n"
-        "يجب أن يكون الإخراج JSON صالح تماماً بدون أي تعليق أو نص آخر."
+        "- علف، عمال، علاج، كهرباء، ماء، اخرى.\n\n"
+        "أخرج JSON صالح فقط بدون أي تعليق أو نص آخر."
     )
 
     user_content = {
@@ -175,21 +165,21 @@ def ai_analyze_message(text, user_id):
         "message": text,
     }
 
+    prompt = (
+        system_instructions
+        + "\n\nالبيانات التالية تمثل رسالة المستخدم بصيغة JSON:\n"
+        + json.dumps(user_content, ensure_ascii=False)
+        + "\n\nأرجع JSON واحد فقط كما هو مطلوب."
+    )
+
     try:
-        resp = openai.ChatCompletion.create(
+        resp = client.responses.create(
             model="gpt-4.1-mini",
-            messages=[
-                {"role": "system", "content": system_instructions},
-                {"role": "user", "content": json.dumps(user_content, ensure_ascii=False)},
-            ],
+            input=prompt,
             response_format={"type": "json_object"},
-            max_tokens=400,
+            max_output_tokens=400,
         )
-        msg = resp.choices[0].message
-        if isinstance(msg, dict):
-            raw = msg.get("content", "")
-        else:
-            raw = getattr(msg, "content", "")
+        raw = resp.output_text
         print("RAW_OPENAI_RESPONSE:", raw)
         data = json.loads(raw)
         return data
