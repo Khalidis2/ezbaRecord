@@ -1,6 +1,6 @@
 # file: telegram_bot.py
-import re
 import os
+import re
 import json
 from datetime import datetime, timedelta, date
 
@@ -184,12 +184,9 @@ def ai_analyze_message(text, user_id):
             response_format={"type": "json_object"},
             max_output_tokens=400,
         )
-
-    raw = resp.output_text
-    data = json.loads(raw)
-    return data
-
-
+        raw = resp.output_text
+        data = json.loads(raw)
+        return data
     except Exception as e:
         print("ERROR calling OpenAI or parsing JSON:", e)
         return None
