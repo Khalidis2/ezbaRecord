@@ -185,10 +185,10 @@ def ai_analyze_message(text, user_id):
             max_output_tokens=400,
         )
 
-        text_obj = resp.output[0].content[0].text
-        raw = getattr(text_obj, "value", str(text_obj))
-        data = json.loads(raw)
-        return data
+    raw = resp.output_text
+    data = json.loads(raw)
+    return data
+
 
     except Exception as e:
         print("ERROR calling OpenAI or parsing JSON:", e)
