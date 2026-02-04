@@ -9,18 +9,26 @@ from google.oauth2.service_account import Credentials
 from telegram.ext import Updater, MessageHandler, Filters, CommandHandler
 from openai import OpenAI
 
+# ============== ENV =================
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 GOOGLE_SERVICE_ACCOUNT_JSON = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
 SHEET_ID = os.environ.get("SHEET_ID")
 
 if not all([BOT_TOKEN, OPENAI_API_KEY, GOOGLE_SERVICE_ACCOUNT_JSON, SHEET_ID]):
-    raise RuntimeError("Missing environment variables: BOT_TOKEN / OPENAI_API_KEY / GOOGLE_SERVICE_ACCOUNT_JSON / SHEET_ID")
+    raise RuntimeError(
+        "Missing environment variables: BOT_TOKEN / OPENAI_API_KEY / "
+        "GOOGLE_SERVICE_ACCOUNT_JSON / SHEET_ID"
+    )
 
+# ============== Clients ============
 openai_client = OpenAI(api_key=OPENAI_API_KEY)
 
 ALLOWED_USERS = {47329648}
 USER_NAMES = {47329648: "أنت"}
+
+# لكل مستخدم نخزن آخر رسالة تنتظر تأكيد
+PENDING_MESSAGES = {}  # user_id -> {"text": str}
 
 
 def get_sheet():
@@ -38,22 +46,29 @@ def authorized(update):
     return update.message.from_user.id in ALLOWED_USERS
 
 
+# ============== AI helpers =============
 def extract_json_from_raw(raw_text):
     if not isinstance(raw_text, str):
         raw_text = str(raw_text)
+
+    # direct
     try:
         return json.loads(raw_text)
     except Exception:
         pass
+
+    # search for JSON object
     start = raw_text.find("{")
     if start == -1:
         raise ValueError("no JSON object found in response")
+
     for end in range(len(raw_text) - 1, start, -1):
-        candidate = raw_text[start:end + 1]
+        candidate = raw_text[start : end + 1]
         try:
             return json.loads(candidate)
         except Exception:
             continue
+
     raise ValueError("no parseable JSON found")
 
 
@@ -154,13 +169,20 @@ def analyze_with_ai(text):
     return data
 
 
+# ============== Balance helper =============
 def compute_previous_balance(sheet):
+    """
+    balance = sum(بيع) - sum(غيره)
+    الأعمدة: B=process , E=amount
+    """
     try:
         rows = sheet.get_all_values()
     except Exception:
         return 0.0
+
     if len(rows) <= 1:
         return 0.0
+
     balance = 0.0
     for row in rows[1:]:
         if len(row) < 5:
@@ -173,37 +195,61 @@ def compute_previous_balance(sheet):
             amt = float(str(amount_str).replace(",", ""))
         except Exception:
             continue
+
         if proc == "بيع":
             balance += amt
         else:
             balance -= amt
+
     return round(balance, 2)
 
 
+# ============== Commands =============
 def help_command(update, context):
-update.message.reply_text(
-    "📨 تأكيد العملية\n"
-    f"رسالتك:\n\"{text}\"\n\n"
-    "هل أنت متأكد أنك تريد حفظ هذه العملية في Google Sheets؟\n"
-    "سأقوم الآن بتحليلها بالذكاء الاصطناعي وحفظها إذا كانت عملية مالية."
-)
+    update.message.reply_text(
+        "✍️ مثال للشراء:\n"
+        "امس اشتريت علف 20 كيس ب 500\n\n"
+        "✍️ مثال للبيع:\n"
+        "اليوم بعت 100 بيضة ب 100 درهم\n\n"
+        "الخطوات الآن:\n"
+        "1️⃣ تكتب الرسالة\n"
+        "2️⃣ البوت يسألك إذا متأكد\n"
+        "3️⃣ ترسل /confirm للحفظ أو /cancel للإلغاء\n\n"
+        "الرصيد:\n"
+        "شراء / فاتورة / راتب = سالب من الرصيد\n"
+        "بيع = زائد على الرصيد"
+    )
 
 
-
-def handle_message(update, context):
+def cancel_command(update, context):
     user_id = update.message.from_user.id
     if not authorized(update):
         update.message.reply_text("❌ غير مصرح لك")
         return
 
-    text = update.message.text
+    if user_id in PENDING_MESSAGES:
+        del PENDING_MESSAGES[user_id]
+        update.message.reply_text("❌ تم إلغاء العملية، لن يتم حفظ شيء.")
+    else:
+        update.message.reply_text("ℹ️ لا توجد عملية قيد التأكيد حالياً.")
 
-    update.message.reply_text(
-        f"📨 تأكيد:\n"
-        f"هل تقصد هذه الرسالة:\n\"{text}\"\n"
-        "سيتم تحليلها الآن وحفظها في Google Sheets إذا كانت عملية مالية."
-    )
 
+def confirm_command(update, context):
+    user_id = update.message.from_user.id
+    if not authorized(update):
+        update.message.reply_text("❌ غير مصرح لك")
+        return
+
+    pending = PENDING_MESSAGES.get(user_id)
+    if not pending:
+        update.message.reply_text("ℹ️ لا توجد رسالة قيد التأكيد. أرسل رسالة جديدة أولاً.")
+        return
+
+    text = pending["text"]
+    # بعد التأكيد نمسحها عشان ما تنعاد
+    del PENDING_MESSAGES[user_id]
+
+    # الآن نحلل بالـ AI ونحفظ
     try:
         ai_data = analyze_with_ai(text)
     except Exception as e:
@@ -212,7 +258,9 @@ def handle_message(update, context):
         return
 
     if not ai_data.get("should_save", False):
-        update.message.reply_text("ℹ️ ليست عملية مالية — لم يتم حفظ شيء.")
+        update.message.reply_text(
+            "ℹ️ بعد التحليل تبيّن أنها ليست عملية مالية — لم يتم حفظ شيء."
+        )
         return
 
     date_str = ai_data.get("date") or datetime.now().date().isoformat()
@@ -238,8 +286,7 @@ def handle_message(update, context):
         return
 
     person_name = USER_NAMES.get(
-        user_id,
-        update.message.from_user.first_name or "مستخدم",
+        user_id, update.message.from_user.first_name or "مستخدم"
     )
 
     try:
@@ -259,7 +306,7 @@ def handle_message(update, context):
         )
         sign_str = "+" if signed_amount >= 0 else "-"
         update.message.reply_text(
-            "✅ تم الحفظ\n"
+            "✅ تم الحفظ في Google Sheets\n"
             f"{date_str} | {process} | {type_} | {item or '-'} | {amount}\n"
             f"التأثير على الرصيد: {sign_str}{abs(signed_amount)}\n"
             f"الرصيد الآن: {new_balance}"
@@ -269,6 +316,28 @@ def handle_message(update, context):
         update.message.reply_text(f"❌ خطأ في الحفظ داخل Google Sheets:\n{e}")
 
 
+# ============== Message handler =============
+def handle_message(update, context):
+    user_id = update.message.from_user.id
+    if not authorized(update):
+        update.message.reply_text("❌ غير مصرح لك")
+        return
+
+    text = update.message.text
+
+    # خزن الرسالة كرسالة قيد التأكيد
+    PENDING_MESSAGES[user_id] = {"text": text}
+
+    update.message.reply_text(
+        "📨 تأكيد العملية\n"
+        f"رسالتك:\n\"{text}\"\n\n"
+        "هل أنت متأكد أنك تريد حفظ هذه العملية في Google Sheets؟\n"
+        "إذا نعم، أرسل الأمر: /confirm\n"
+        "إذا لا، أرسل: /cancel"
+    )
+
+
+# ============== Reports =============
 def load_expenses():
     sheet = get_sheet()
     rows = sheet.get_all_values()
@@ -294,7 +363,9 @@ def week_report(update, context):
     today = datetime.now().date()
     start = today - timedelta(days=6)
     total = sum(e["amount"] for e in expenses if start <= e["date"] <= today)
-    update.message.reply_text(f"📊 مجموع المبالغ (بدون إشارات) لآخر 7 أيام: {total}")
+    update.message.reply_text(
+        f"📊 مجموع المبالغ (بدون إشارات) لآخر 7 أيام: {total}"
+    )
 
 
 def month_report(update, context):
@@ -302,7 +373,9 @@ def month_report(update, context):
     today = datetime.now().date()
     start = datetime(today.year, today.month, 1).date()
     total = sum(e["amount"] for e in expenses if start <= e["date"] <= today)
-    update.message.reply_text(f"📊 مجموع المبالغ (بدون إشارات) لهذا الشهر: {total}")
+    update.message.reply_text(
+        f"📊 مجموع المبالغ (بدون إشارات) لهذا الشهر: {total}"
+    )
 
 
 def status_report(update, context):
@@ -312,20 +385,25 @@ def status_report(update, context):
     month_start = datetime(today.year, today.month, 1).date()
     total_today = sum(e["amount"] for e in expenses if e["date"] == today)
     total_week = sum(e["amount"] for e in expenses if week_start <= e["date"] <= today)
-    total_month = sum(e["amount"] for e in expenses if month_start <= e["date"] <= today)
+    total_month = sum(
+        e["amount"] for e in expenses if month_start <= e["date"] <= today
+    )
     update.message.reply_text(
         f"اليوم (مجموع المبالغ): {total_today}\n"
         f"آخر 7 أيام (مجموع المبالغ): {total_week}\n"
         f"هذا الشهر (مجموع المبالغ): {total_month}\n\n"
-        "ملاحظة: هذه الأرقام مجموع مبالغ فقط، الرصيد الفعلي في آخر صف في عمود balance."
+        "ملاحظة: هذه أرقام مجموع المبالغ فقط، الرصيد الفعلي في آخر صف في عمود balance."
     )
 
 
+# ============== Main =============
 def main():
     updater = Updater(BOT_TOKEN, use_context=True)
     dp = updater.dispatcher
 
     dp.add_handler(CommandHandler("help", help_command))
+    dp.add_handler(CommandHandler("cancel", cancel_command))
+    dp.add_handler(CommandHandler("confirm", confirm_command))
     dp.add_handler(CommandHandler("week", week_report))
     dp.add_handler(CommandHandler("month", month_report))
     dp.add_handler(CommandHandler("status", status_report))
