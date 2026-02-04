@@ -7,12 +7,15 @@ from datetime import datetime, timedelta, date
 import gspread
 from google.oauth2.service_account import Credentials
 from telegram.ext import Updater, MessageHandler, Filters, CommandHandler
-from openai import OpenAI
+import openai
 
 TOKEN = os.environ.get("BOT_TOKEN")
 SHEET_ID = os.environ.get("SHEET_ID")
 GOOGLE_SERVICE_ACCOUNT_JSON = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+
+if OPENAI_API_KEY:
+    openai.api_key = OPENAI_API_KEY
 
 ALLOWED_USERS = [
     47329648,
@@ -39,8 +42,6 @@ USER_PROCESS_OVERRIDE = {}
 
 ALLOWED_PROCESSES = {"شراء", "بيع", "فاتورة", "راتب", "أخرى"}
 ALLOWED_TYPES = {"علف", "عمال", "علاج", "كهرباء", "ماء", "اخرى"}
-
-client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
 
 def get_sheet():
@@ -128,7 +129,7 @@ def process_command(update, context):
 
 
 def ai_analyze_message(text, user_id):
-    if not client:
+    if not OPENAI_API_KEY:
         return None
 
     person_name = USER_NAMES.get(user_id, "مستخدم")
@@ -175,20 +176,25 @@ def ai_analyze_message(text, user_id):
     }
 
     try:
-        resp = client.responses.create(
+        resp = openai.ChatCompletion.create(
             model="gpt-4.1-mini",
-            input=[
+            messages=[
                 {"role": "system", "content": system_instructions},
                 {"role": "user", "content": json.dumps(user_content, ensure_ascii=False)},
             ],
             response_format={"type": "json_object"},
-            max_output_tokens=400,
+            max_tokens=400,
         )
-        raw = resp.output_text
+        msg = resp.choices[0].message
+        if isinstance(msg, dict):
+            raw = msg.get("content", "")
+        else:
+            raw = getattr(msg, "content", "")
+        print("RAW_OPENAI_RESPONSE:", raw)
         data = json.loads(raw)
         return data
     except Exception as e:
-        print("ERROR calling OpenAI or parsing JSON:", e)
+        print("ERROR calling OpenAI or parsing JSON:", repr(e))
         return None
 
 
@@ -265,7 +271,7 @@ def handle_message(update, context):
             f"الوصف: {note}"
         )
     except Exception as e:
-        print("ERROR saving to sheet:", e)
+        print("ERROR saving to sheet:", repr(e))
         update.message.reply_text("❌ صار خطأ أثناء الحفظ في Google Sheets")
 
 
