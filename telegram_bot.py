@@ -25,9 +25,10 @@ if not all([BOT_TOKEN, OPENAI_API_KEY, GOOGLE_SERVICE_ACCOUNT_JSON, SHEET_ID]):
 openai_client = OpenAI(api_key=OPENAI_API_KEY)
 
 # حط IDs اللي تسمح لهم يستخدمون البوت هنا
-ALLOWED_USERS = {47329648}
+ALLOWED_USERS = {47329648, 6894180427}
 USER_NAMES = {
-    47329648: "أنت",
+    47329648: "Khaled",
+    6894180427: "Hamad"
 }
 
 # نخزن آخر رسالة تنتظر تأكيد لكل مستخدم
