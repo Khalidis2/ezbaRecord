@@ -1,4 +1,4 @@
 python-telegram-bot==13.15
 gspread
 google-auth
-openai
+openai>=1.0.0
