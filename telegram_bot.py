@@ -206,19 +206,22 @@ def compute_previous_balance(sheet):
 
 # ============== Commands =============
 def help_command(update, context):
-    update.message.reply_text(
-        "✍️ مثال للشراء:\n"
-        "امس اشتريت علف 20 كيس ب 500\n\n"
-        "✍️ مثال للبيع:\n"
-        "اليوم بعت 100 بيضة ب 100 درهم\n\n"
-        "الخطوات الآن:\n"
-        "1️⃣ تكتب الرسالة\n"
-        "2️⃣ البوت يسألك إذا متأكد\n"
-        "3️⃣ ترسل /confirm للحفظ أو /cancel للإلغاء\n\n"
-        "الرصيد:\n"
-        "شراء / فاتورة / راتب = سالب من الرصيد\n"
-        "بيع = زائد على الرصيد"
+    text = (
+        "📋 أوامر البوت:\n\n"
+        "🆘 /help - عرض قائمة الأوامر هذه\n"
+        "💰 /balance - عرض الرصيد الحالي (دخل - مصاريف)\n"
+        "📅 /week - مجموع المبالغ (بدون إشارات) لآخر 7 أيام\n"
+        "📆 /month - مجموع المبالغ (بدون إشارات) لهذا الشهر\n"
+        "📊 /status - ملخص اليوم + الأسبوع + الشهر\n"
+        "✅ /confirm - تأكيد وحفظ آخر رسالة كتبتها\n"
+        "❌ /cancel - إلغاء آخر رسالة قيد التأكيد\n\n"
+        "✍️ طريقة الاستخدام:\n"
+        "1️⃣ اكتب رسالة طبيعية عن عملية البيع أو الشراء.\n"
+        "2️⃣ البوت يرسل لك رسالة تأكيد.\n"
+        "3️⃣ إذا موافق، أرسل /confirm ليتم التحليل والحفظ في Google Sheets.\n"
+        "4️⃣ إذا ما تبي تحفظها، أرسل /cancel.\n"
     )
+    update.message.reply_text(text)
 
 
 def cancel_command(update, context):
@@ -316,6 +319,23 @@ def confirm_command(update, context):
         update.message.reply_text(f"❌ خطأ في الحفظ داخل Google Sheets:\n{e}")
 
 
+def balance_command(update, context):
+    """Show current balance using same logic as saving."""
+    user_id = update.message.from_user.id
+    if not authorized(update):
+        update.message.reply_text("❌ غير مصرح لك")
+        return
+
+    try:
+        sheet = get_sheet()
+        balance = compute_previous_balance(sheet)
+    except Exception as e:
+        update.message.reply_text(f"❌ خطأ في قراءة الرصيد من Google Sheets:\n{e}")
+        return
+
+    update.message.reply_text(f"💰 الرصيد الحالي في الدفتر: {balance}")
+
+
 # ============== Message handler =============
 def handle_message(update, context):
     user_id = update.message.from_user.id
@@ -404,6 +424,7 @@ def main():
     dp.add_handler(CommandHandler("help", help_command))
     dp.add_handler(CommandHandler("cancel", cancel_command))
     dp.add_handler(CommandHandler("confirm", confirm_command))
+    dp.add_handler(CommandHandler("balance", balance_command))
     dp.add_handler(CommandHandler("week", week_report))
     dp.add_handler(CommandHandler("month", month_report))
     dp.add_handler(CommandHandler("status", status_report))
