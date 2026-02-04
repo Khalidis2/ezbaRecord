@@ -28,7 +28,7 @@ openai_client = OpenAI(api_key=OPENAI_API_KEY)
 ALLOWED_USERS = {47329648, 6894180427}
 USER_NAMES = {
     47329648: "Khaled",
-    6894180427: "Hamad"
+    6894180427: "Hamad" 
 }
 
 # نخزن آخر رسالة تنتظر تأكيد لكل مستخدم
