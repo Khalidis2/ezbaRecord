@@ -90,7 +90,7 @@ def analyze_with_ai(text):
         "- أخرى: أي شيء غير ذلك.\n\n"
         "type:\n"
         "- علف: علف، شعير، برسيم، تبن، مركزات.\n"
-        "- منتجات: بيض، حليب، لحم، صوف، سمن، أي منتج من المزرعة.\n"
+        "- منتجات: بيض، حليب, لحم, صوف, سمن, أي منتج من المزرعة.\n"
         "- عمال: رواتب أو مصاريف العمال.\n"
         "- علاج: دواء، علاج، بيطري.\n"
         "- كهرباء: كهرب، مولد.\n"
@@ -185,7 +185,22 @@ def compute_previous_balance(sheet):
     return round(balance, 2)
 
 
+def start_command(update, context):
+    if not authorized(update):
+        update.message.reply_text("❌ غير مصرح لك باستخدام هذا البوت.")
+        return
+    update.message.reply_text(
+        "👋 أهلاً، هذا بوت المحاسبة للمزرعة.\n"
+        "اكتب أي عملية شراء أو بيع بالعربي بشكل طبيعي، ثم أكد الحفظ بالأمر /confirm.\n"
+        "استخدم /help لرؤية كل الأوامر."
+    )
+
+
 def help_command(update, context):
+    if not authorized(update):
+        update.message.reply_text("❌ غير مصرح لك باستخدام هذا البوت.")
+        return
+
     text = (
         "📋 أوامر البوت:\n\n"
         "🆘 /help - عرض قائمة الأوامر هذه\n"
@@ -373,6 +388,9 @@ def load_expenses():
 
 
 def week_report(update, context):
+    if not authorized(update):
+        update.message.reply_text("❌ غير مصرح لك")
+        return
     expenses = load_expenses()
     today = datetime.now().date()
     start = today - timedelta(days=6)
@@ -383,6 +401,9 @@ def week_report(update, context):
 
 
 def month_report(update, context):
+    if not authorized(update):
+        update.message.reply_text("❌ غير مصرح لك")
+        return
     expenses = load_expenses()
     today = datetime.now().date()
     start = datetime(today.year, today.month, 1).date()
@@ -393,6 +414,9 @@ def month_report(update, context):
 
 
 def status_report(update, context):
+    if not authorized(update):
+        update.message.reply_text("❌ غير مصرح لك")
+        return
     expenses = load_expenses()
     today = datetime.now().date()
     week_start = today - timedelta(days=6)
@@ -414,6 +438,7 @@ def main():
     updater = Updater(BOT_TOKEN, use_context=True)
     dp = updater.dispatcher
 
+    dp.add_handler(CommandHandler("start", start_command))
     dp.add_handler(CommandHandler("help", help_command))
     dp.add_handler(CommandHandler("cancel", cancel_command))
     dp.add_handler(CommandHandler("confirm", confirm_command))
