@@ -175,18 +175,21 @@ def ai_analyze_message(text, user_id):
     }
 
     try:
-        resp = client.chat.completions.create(
+        resp = client.responses.create(
             model="gpt-4.1-mini",
-            messages=[
+            input=[
                 {"role": "system", "content": system_instructions},
                 {"role": "user", "content": json.dumps(user_content, ensure_ascii=False)},
             ],
             response_format={"type": "json_object"},
-            max_tokens=400,
+            max_output_tokens=400,
         )
-        raw = resp.choices[0].message.content
+
+        text_obj = resp.output[0].content[0].text
+        raw = getattr(text_obj, "value", str(text_obj))
         data = json.loads(raw)
         return data
+
     except Exception as e:
         print("ERROR calling OpenAI or parsing JSON:", e)
         return None
