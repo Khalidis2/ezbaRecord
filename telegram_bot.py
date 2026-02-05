@@ -357,21 +357,21 @@ def choose_date_from_ai(ai_date, original_text: str) -> str:
 
 
 def update_livestock_summary(animal_type: str, breed: str, count: int, movement: str):
-    import re
+    import re as _re
 
     def norm(s: str) -> str:
         if not isinstance(s, str):
             return ""
         s = s.strip()
-        # توحيد بعض الحروف
         s = s.replace("أ", "ا").replace("إ", "ا").replace("آ", "ا")
         s = s.replace("ة", "ه").replace("ى", "ي")
-        # إزالة كل شيء غير حروف عربية أو أرقام (مسافات، تشكيل، رموز…)
-        s = re.sub(r"[^\u0621-\u063A\u0641-\u064A0-9]+", "", s)
+        s = _re.sub(r"[^\u0621-\u063A\u0641-\u064A0-9]+", "", s)
         return s
 
-    animal_type = norm(animal_type)
-    breed = norm(breed)
+    animal_type_raw = animal_type or ""
+    breed_raw = breed or ""
+    animal_type_n = norm(animal_type_raw)
+    breed_n = norm(breed_raw)
     movement = (movement or "").strip()
 
     try:
@@ -383,35 +383,57 @@ def update_livestock_summary(animal_type: str, breed: str, count: int, movement:
 
     current_row_index = None
     current_value = 0
+    current_breed_display = breed_raw
+    same_type_rows = []
 
-    # نبحث عن صف يطابق نفس النوع + السلالة بعد التطبيع
     for idx, row in enumerate(rows[1:], start=2):
-        a = norm(row[0] or "")
-        b = norm(row[1] or "")
-        if a == animal_type and b == breed:
+        a_raw = row[0] or ""
+        b_raw = row[1] or ""
+        a_n = norm(a_raw)
+        b_n = norm(b_raw)
+        if a_n == animal_type_n:
+            same_type_rows.append((idx, a_raw, b_raw, row))
+        if a_n == animal_type_n and breed_n and b_n == breed_n:
             current_row_index = idx
+            current_breed_display = b_raw
             try:
                 current_value = int(float((row[2] or "0").strip()))
             except Exception:
                 current_value = 0
             break
 
-    # لو الحركة "إجمالي" → نعتبرها ضبط مباشر للعدد
+    if current_row_index is None and movement != "إجمالي" and same_type_rows:
+        idx, a_raw, b_raw, row = same_type_rows[0]
+        current_row_index = idx
+        current_breed_display = b_raw
+        try:
+            current_value = int(float((row[2] or "0").strip()))
+        except Exception:
+            current_value = 0
+
     if movement == "إجمالي":
         new_value = count
+        if current_row_index is None and same_type_rows:
+            idx, a_raw, b_raw, row = same_type_rows[0]
+            current_row_index = idx
+            current_breed_display = b_raw
     else:
         minus_moves = {"بيع", "نقص", "نفوق"}
         sign = -1 if movement in minus_moves else 1
         new_value = current_value + sign * count
-        # لا نسمح أن العدد يكون أقل من صفر
         if new_value < 0:
             new_value = 0
 
-    # إذا لقينا صف قديم نحدّثه، غير كذا نضيف صف جديد
     if current_row_index is None:
+        display_animal = animal_type_raw or (same_type_rows[0][1] if same_type_rows else "")
+        display_breed = (
+            breed_raw
+            or current_breed_display
+            or (same_type_rows[0][2] if same_type_rows else "اخرى")
+        )
         try:
             sheet.append_row(
-                [animal_type, breed, new_value],
+                [display_animal, display_breed, new_value],
                 value_input_option="USER_ENTERED",
             )
         except Exception as e:
@@ -421,6 +443,7 @@ def update_livestock_summary(animal_type: str, breed: str, count: int, movement:
             sheet.update_cell(current_row_index, 3, new_value)
         except Exception as e:
             print("ERROR updating summary row:", repr(e))
+
 
 def get_livestock_totals():
     sheet = get_livestock_summary_sheet()
@@ -478,7 +501,6 @@ def start_command(update, context):
         "• تبويب \"المواشي - إجمالي\" = العدد الحالي لكل نوع/سلالة.\n"
         "• تقدر تسجل حصر كامل برسالة مثل:\n"
         "  سجل العدد الكلي للمواشي كالتالي: عدد (60) حري ...\n"
-        "  وهذا يضبط الأعداد في \"المواشي - إجمالي\".\n"
         "• أي بيع/شراء/مواليد للمواشي يعدّل الأعداد تلقائياً.\n"
         "• لعرض الأعداد الحالية: /livestock أو اكتب: اعرض المواشي المسجلة.\n"
         "افتراضياً يسجل التاريخ على اليوم، وإذا ذكرت تاريخ معيّن يحفظ على هذاك التاريخ."
