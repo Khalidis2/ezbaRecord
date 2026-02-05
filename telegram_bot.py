@@ -12,7 +12,6 @@ from google.oauth2.service_account import Credentials
 from telegram.ext import Updater, MessageHandler, Filters, CommandHandler
 from openai import OpenAI
 
-# ================== ENV ==================
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 GOOGLE_SERVICE_ACCOUNT_JSON = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
@@ -24,21 +23,17 @@ if not all([BOT_TOKEN, OPENAI_API_KEY, GOOGLE_SERVICE_ACCOUNT_JSON, SHEET_ID]):
         "GOOGLE_SERVICE_ACCOUNT_JSON / SHEET_ID"
     )
 
-# ================== CLIENTS ==============
 openai_client = OpenAI(api_key=OPENAI_API_KEY)
 
-# المستخدمين المصرح لهم
 ALLOWED_USERS = {47329648, 6894180427}
 USER_NAMES = {
     47329648: "خالد",
     6894180427: "حمد",
 }
 
-# نخزن آخر رسالة تنتظر تأكيد لكل مستخدم
 PENDING_MESSAGES = {}
 
 
-# ================== SHEETS HELPERS ==================
 def _get_gspread_client():
     info = json.loads(GOOGLE_SERVICE_ACCOUNT_JSON)
     scopes = [
@@ -73,7 +68,6 @@ def authorized(update):
     return update.message.from_user.id in ALLOWED_USERS
 
 
-# ================== AI HELPERS ==================
 def extract_json_from_raw(raw_text):
     if not isinstance(raw_text, str):
         raw_text = str(raw_text)
@@ -105,30 +99,29 @@ def analyze_with_ai(text):
         "أنت مساعد مالي لمزرعة وغنم. أعد فقط JSON صالح بدون أي تعليق.\n"
         "استخدم السكيم التالي للأعمال المالية:\n"
         "{\n"
-        '  \"should_save\": true|false,\n'
-        '  \"mode\": \"transaction\"|\"query\"|\"other\",\n'
-        '  \"date\": \"YYYY-MM-DD\",\n'
-        '  \"process\": \"شراء\"|\"بيع\"|\"فاتورة\"|\"راتب\"|\"أخرى\",\n'
-        '  \"type\": \"علف\"|\"منتجات\"|\"عمال\"|\"علاج\"|\"كهرباء\"|\"ماء\"|\"اخرى\",\n'
-        '  \"item\": \"وصف قصير للشيء (بيض، حليب، علف، ...)\",\n'
-        '  \"amount\": رقم موجب فقط أو null إذا غير معروف,\n'
-        '  \"note\": \"نص\",\n'
-        '  \"query_mode\": true|false,\n'
-        '  \"query_process\": \"شراء\"|\"بيع\"|\"فاتورة\"|\"راتب\"|\"أخرى\"|null,\n'
-        '  \"query_type\": \"علف\"|\"منتجات\"|\"عمال\"|\"علاج\"|\"كهرباء\"|\"ماء\"|\"اخرى\"|null,\n'
-        '  \"query_item\": نص أو null,\n'
-        '  \"query_period\": \"today\"|\"yesterday\"|\"this_week\"|\"last_7_days\"|\"this_month\"|\"all_time\",\n'
-        '  \"livestock_change_mode\": true|false,\n'
-        '  \"livestock_animal_type\": \"غنم\"|\"أبقار\"|\"ثور\"|\"ماعز\"|\"جمال\"|\"اخرى\"|null,\n'
-        '  \"livestock_breed\": \"حري\"|\"صلالي\"|\"صومالي\"|\"سوري\"|\"اضاحي\"|\"اخرى\"|null,\n'
-        '  \"livestock_delta\": عدد صحيح (سالب للبيع/النقص، موجب للإضافة، 0 أو null إذا لا يوجد تأثير)\n'
+        '  "should_save": true|false,\n'
+        '  "mode": "transaction"|"query"|"other",\n'
+        '  "date": "YYYY-MM-DD",\n'
+        '  "process": "شراء"|"بيع"|"فاتورة"|"راتب"|"أخرى",\n'
+        '  "type": "علف"|"منتجات"|"عمال"|"علاج"|"كهرباء"|"ماء"|"اخرى",\n'
+        '  "item": "وصف قصير",\n'
+        '  "amount": رقم موجب أو null,\n'
+        '  "note": "نص",\n'
+        '  "query_mode": true|false,\n'
+        '  "query_process": "شراء"|"بيع"|"فاتورة"|"راتب"|"أخرى"|null,\n'
+        '  "query_type": "علف"|"منتجات"|"عمال"|"علاج"|"كهرباء"|"ماء"|"اخرى"|null,\n'
+        '  "query_item": نص أو null,\n'
+        '  "query_period": "today"|"yesterday"|"this_week"|"last_7_days"|"this_month"|"all_time",\n'
+        '  "livestock_change_mode": true|false,\n'
+        '  "livestock_animal_type": "غنم"|"أبقار"|"ثور"|"ماعز"|"جمال"|"اخرى"|null,\n'
+        '  "livestock_breed": "حري"|"صلالي"|"صومالي"|"سوري"|"اضاحي"|"اخرى"|null,\n'
+        '  "livestock_delta": عدد صحيح\n'
         "}\n\n"
         "التاريخ:\n"
         f"- إذا قال أمس/امس → استخدم {yesterday}\n"
         f"- إذا قال اليوم أو لم يذكر تاريخ → استخدم {today}\n"
-        "- إذا ذكر تاريخ صريح فحوّله إلى YYYY-MM-DD.\n\n"
-        "process/type/amount كما في الشرح السابق.\n"
-        "إذا لم تكن الرسالة عملية مالية يمكن حفظها، اجعل should_save = false دائماً."
+        "- إذا ذكر تاريخ صريح فحوّله إلى YYYY-MM-DD.\n"
+        "إذا لم تكن الرسالة عملية مالية يمكن حفظها، اجعل should_save = false.\n"
     )
 
     user_block = json.dumps({"message": text}, ensure_ascii=False)
@@ -187,21 +180,20 @@ def analyze_with_ai(text):
 def analyze_livestock(text):
     system_instructions = (
         "أنت مساعد لإدارة المواشي في المزرعة. أعد فقط JSON صالح بدون أي تعليق.\n"
-        "المطلوب: تحويل النص إلى قائمة سجلات مواشي.\n"
-        "استخدم السكيم التالي:\n"
+        "السكيم:\n"
         "{\n"
-        '  \"date\": \"YYYY-MM-DD\",\n'
-        '  \"note\": \"نص قصير يصف هذه العملية أو الصورة العامة\",\n'
-        '  \"entries\": [\n'
+        '  "date": "YYYY-MM-DD",\n'
+        '  "note": "نص",\n'
+        '  "entries": [\n'
         "    {\n"
-        '      \"animal_type\": \"غنم\"|\"أبقار\"|\"ثور\"|\"جمال\"|\"ماعز\"|\"اخرى\",\n'
-        '      \"breed\": \"حري\"|\"صلالي\"|\"صومالي\"|\"سوري\"|\"اضاحي\"|\"اخرى\",\n'
-        '      \"count\": عدد صحيح موجب,\n'
-        '      \"movement\": \"إجمالي\"|\"إضافة\"|\"نقص\"|\"بيع\"|\"نفوق\"|\"مواليد\"\n'
+        '      "animal_type": "غنم"|"أبقار"|"ثور"|"جمال"|"ماعز"|"اخرى",\n'
+        '      "breed": "حري"|"صلالي"|"صومالي"|"سوري"|"اضاحي"|"اخرى",\n'
+        '      "count": عدد صحيح موجب,\n'
+        '      "movement": "إجمالي"|"إضافة"|"نقص"|"بيع"|"نفوق"|"مواليد"\n'
         "    }\n"
         "  ]\n"
-        "}\n\n"
-        "إذا كان النص مثل: \"سجل العدد الكلي للمواشي كالتالي: عدد (60) حري ...\" فهذا يعني صورة إجمالية للحظيرة، واجعل movement = \"إجمالي\" لكل بند.\n"
+        "}\n"
+        "إذا كانت الرسالة من نوع: سجل العدد الكلي للمواشي كالتالي: ... فاجعل movement = \"إجمالي\".\n"
         "إذا لم يذكر تاريخ صريح استخدم تاريخ اليوم.\n"
     )
 
@@ -258,7 +250,6 @@ def analyze_livestock(text):
     return data
 
 
-# ================== BALANCE HELPERS ==================
 def compute_previous_balance(sheet):
     try:
         rows = sheet.get_all_values()
@@ -310,7 +301,6 @@ def choose_date_from_ai(ai_date, original_text: str) -> str:
     return today.isoformat()
 
 
-# ================== LIVESTOCK SUMMARY ==================
 def update_livestock_summary(animal_type: str, breed: str, count: int, movement: str):
     import re as _re
 
@@ -445,20 +435,17 @@ def reply_livestock_status(update):
     update.message.reply_text(msg)
 
 
-# ================== COMMANDS ==================
 def start_command(update, context):
     if not authorized(update):
         update.message.reply_text("❌ غير مصرح لك باستخدام هذا البوت.")
         return
     update.message.reply_text(
         "👋 أهلاً، هذا بوت المحاسبة للمزرعة.\n"
-        "• العمليات المالية تُحفظ في شيت Azba Expenses.\n"
-        "• تبويب \"المواشي - إجمالي\" = العدد الحالي لكل نوع/سلالة.\n"
-        "• تقدر تسجل حصر كامل برسالة مثل:\n"
+        "• العمليات المالية في ورقة Azba Expenses.\n"
+        "• أعداد المواشي الحالية في تبويب \"المواشي - إجمالي\".\n"
+        "• سجل حصر كامل برسالة مثل:\n"
         "  سجل العدد الكلي للمواشي كالتالي: عدد (60) حري ...\n"
-        "• أي بيع/شراء/مواليد للمواشي يعدّل الأعداد تلقائياً.\n"
-        "• لعرض الأعداد الحالية: /livestock أو اكتب: اعرض المواشي المسجلة.\n"
-        "افتراضياً يسجل التاريخ على اليوم، وإذا ذكرت تاريخ معيّن يحفظ على هذاك التاريخ."
+        "• لعرض المواشي: /livestock أو اكتب: اعرض المواشي المسجلة.\n"
     )
 
 
@@ -470,22 +457,14 @@ def help_command(update, context):
     text = (
         "📋 أوامر البوت:\n\n"
         "🆘 /help - عرض قائمة الأوامر.\n"
-        "💰 /balance - عرض الرصيد الحالي من المصاريف/الدخل.\n"
-        "↩️ /undo - حذف آخر عملية مالية محفوظة.\n"
+        "💰 /balance - عرض الرصيد الحالي.\n"
+        "↩️ /undo - حذف آخر عملية مالية.\n"
         "📅 /week - ملخص آخر 7 أيام.\n"
         "📆 /month - ملخص هذا الشهر.\n"
         "📊 /status - ملخص اليوم + الأسبوع + الشهر.\n"
-        "🐑 /livestock - عرض عدد المواشي الحالي من تبويب \"المواشي - إجمالي\".\n"
+        "🐑 /livestock - عرض أعداد المواشي الحالية.\n"
         "✅ /confirm - تأكيد وحفظ آخر رسالة.\n"
-        "❌ /cancel - إلغاء آخر رسالة قيد التأكيد.\n\n"
-        "مثال عملية مالية:\n"
-        "• شريت علف ب 500\n"
-        "• تم بيع غنم اضاحي 2 ب 1500\n\n"
-        "تسجيل عدد المواشي (حصر كامل):\n"
-        "سجل العدد الكلي للمواشي كالتالي:\n"
-        "عدد (60) حري\n"
-        "عدد (8) صلالي\n"
-        "عدد (7) أبقار\n"
+        "❌ /cancel - إلغاء آخر رسالة قيد التأكيد.\n"
     )
     update.message.reply_text(text)
 
@@ -517,7 +496,6 @@ def confirm_command(update, context):
     text = pending["text"]
     kind = pending.get("kind", "expense")
 
-    # ========= تأكيد عمليات المواشي =========
     if kind == "livestock":
         ai_data = pending.get("ai")
         del PENDING_MESSAGES[user_id]
@@ -533,90 +511,50 @@ def confirm_command(update, context):
 
         date_str = choose_date_from_ai(ai_data.get("date"), text)
 
-        # هل كل الحركات من نوع "إجمالي" ؟ إذا نعم → نعيد بناء التبويب بالكامل
-        all_total = all(
-            (e.get("movement") or "إجمالي") == "إجمالي" for e in entries
-        )
+        try:
+            sheet = get_livestock_summary_sheet()
+            sheet.clear()
+            sheet.append_row(
+                ["نوع الحيوان", "السلالة", "العدد الحالي"],
+                value_input_option="USER_ENTERED",
+            )
 
-        if all_total:
-            try:
-                sheet = get_livestock_summary_sheet()
-                # مسح كل شيء
-                sheet.clear()
-                # إعادة العنوان
+            saved = 0
+            for e in entries:
+                animal_type = e.get("animal_type") or ""
+                breed = e.get("breed") or ""
+                count = e.get("count")
+                if count is None:
+                    continue
+                try:
+                    count_val = int(float(count))
+                    if count_val <= 0:
+                        continue
+                except Exception:
+                    continue
+
                 sheet.append_row(
-                    ["نوع الحيوان", "السلالة", "العدد الحالي"],
+                    [animal_type, breed, count_val],
                     value_input_option="USER_ENTERED",
                 )
-
-                saved = 0
-                for e in entries:
-                    animal_type = e.get("animal_type") or ""
-                    breed = e.get("breed") or ""
-                    count = e.get("count")
-                    if count is None:
-                        continue
-                    try:
-                        count_val = int(float(count))
-                        if count_val <= 0:
-                            continue
-                    except Exception:
-                        continue
-
-                    sheet.append_row(
-                        [animal_type, breed, count_val],
-                        value_input_option="USER_ENTERED",
-                    )
-                    saved += 1
-
-                if saved == 0:
-                    update.message.reply_text(
-                        "❌ لم يتم حفظ أي بند، تأكد من صياغة رسالة الحصر."
-                    )
-                else:
-                    update.message.reply_text(
-                        f"✅ تم تحديث أعداد المواشي في تبويب \"المواشي - إجمالي\" ({saved} بنود).\n"
-                        f"التاريخ (للمعلومية فقط): {date_str}"
-                    )
-            except Exception as e:
-                print("ERROR rebuilding livestock summary:", repr(e))
-                update.message.reply_text(
-                    f"❌ حدث خطأ أثناء تحديث تبويب \"المواشي - إجمالي\":\n{e}"
-                )
-            return
-
-        # لو الرسالة فيها حركات غير إجمالي (مواليد، بيع…)
-        saved = 0
-        for e in entries:
-            animal_type = e.get("animal_type") or ""
-            breed = e.get("breed") or ""
-            movement = e.get("movement") or "إضافة"
-            count = e.get("count")
-            if count is None:
-                continue
-            try:
-                count_val = int(float(count))
-                if count_val <= 0:
-                    continue
-            except Exception:
-                continue
-
-            try:
-                update_livestock_summary(animal_type, breed, count_val, movement)
                 saved += 1
-            except Exception as ex:
-                print("ERROR updating livestock summary:", repr(ex))
 
-        if saved == 0:
-            update.message.reply_text("❌ لم يتم تعديل أي عدد في المواشي، تحقق من الرسالة.")
-        else:
+            if saved == 0:
+                update.message.reply_text(
+                    "❌ لم يتم حفظ أي بند، تأكد من صياغة رسالة الحصر."
+                )
+            else:
+                update.message.reply_text(
+                    f"✅ تم تحديث أعداد المواشي في تبويب \"المواشي - إجمالي\" ({saved} بنود).\n"
+                    f"التاريخ (للمعلومية فقط): {date_str}"
+                )
+        except Exception as e:
+            print("ERROR rebuilding livestock summary:", repr(e))
             update.message.reply_text(
-                f"✅ تم تعديل أعداد المواشي في تبويب \"المواشي - إجمالي\" ({saved} بنود).\n"
-                f"التاريخ (للمعلومية فقط): {date_str}"
+                f"❌ حدث خطأ أثناء تحديث تبويب \"المواشي - إجمالي\":\n{e}"
             )
         return
 
-    # ========= بقية الحالات: عمليات مالية =========
     ai_data = pending.get("ai")
     if not ai_data:
         try:
@@ -967,7 +905,6 @@ def livestock_status_command(update, context):
         reply_livestock_status(update)
 
 
-# ================== MESSAGE HANDLER ==================
 def handle_message(update, context):
     user_id = update.message.from_user.id
     if not authorized(update):
@@ -1071,7 +1008,6 @@ def handle_message(update, context):
     )
 
 
-# ================== HEALTH SERVER (لـ Render) ==================
 def start_health_server():
     port = int(os.environ.get("PORT", "10000"))
 
@@ -1090,7 +1026,6 @@ def start_health_server():
         httpd.serve_forever()
 
 
-# ================== MAIN ==================
 def main():
     server_thread = threading.Thread(target=start_health_server, daemon=True)
     server_thread.start()
