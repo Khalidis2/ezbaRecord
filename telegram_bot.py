@@ -1,5 +1,5 @@
 # file: telegram_bot.py
-# Single header comment as requested — Telegram + OpenAI + Google Sheets bot (webhook-ready)
+# Telegram + OpenAI + Google Sheets bot with Flask webhook (Render-friendly)
 
 import os
 import re
@@ -8,7 +8,17 @@ from datetime import datetime, timedelta
 
 import gspread
 from google.oauth2.service_account import Credentials
-from telegram.ext import Updater, MessageHandler, Filters, CommandHandler
+
+from flask import Flask, request
+
+from telegram import Bot, Update
+from telegram.ext import (
+    Dispatcher,
+    CommandHandler,
+    MessageHandler,
+    Filters,
+)
+
 from openai import OpenAI
 
 # ================== ENV ==================
@@ -27,6 +37,11 @@ if not all([BOT_TOKEN, OPENAI_API_KEY, GOOGLE_SERVICE_ACCOUNT_JSON, SHEET_ID]):
 
 # ================== CLIENTS ==============
 openai_client = OpenAI(api_key=OPENAI_API_KEY)
+
+bot = Bot(BOT_TOKEN)
+dispatcher = Dispatcher(bot, None, workers=0, use_context=True)
+
+app = Flask(__name__)
 
 # Authorized users (Khaled and Hamad)
 ALLOWED_USERS = {47329648, 6894180427}
@@ -1185,48 +1200,53 @@ def handle_message(update, context):
     )
 
 
-# ================== MAIN (Webhook) ==================
+# ================== DISPATCHER SETUP ==================
+dispatcher.add_handler(CommandHandler("start", start_command))
+dispatcher.add_handler(CommandHandler("help", help_command))
+dispatcher.add_handler(CommandHandler("cancel", cancel_command))
+dispatcher.add_handler(CommandHandler("confirm", confirm_command))
+dispatcher.add_handler(CommandHandler("balance", balance_command))
+dispatcher.add_handler(CommandHandler("undo", undo_command))
+dispatcher.add_handler(CommandHandler("week", week_report))
+dispatcher.add_handler(CommandHandler("month", month_report))
+dispatcher.add_handler(CommandHandler("status", status_report))
+dispatcher.add_handler(CommandHandler("livestock", livestock_status_command))
+dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
+
+
+# ================== FLASK ROUTES (WEBHOOK) ==================
+@app.route("/" + BOT_TOKEN, methods=["POST"])
+def telegram_webhook():
+    data = request.get_json(force=True)
+    update = Update.de_json(data, bot)
+    dispatcher.process_update(update)
+    return "OK"
+
+
+@app.route("/", methods=["GET"])
+def index():
+    return "Ezba bot is running."
+
+
+# ================== MAIN ==================
 def main():
-    print("Starting Telegram bot with Webhook...")
-
-    updater = Updater(BOT_TOKEN, use_context=True)
-    dp = updater.dispatcher
-
-    dp.add_handler(CommandHandler("start", start_command))
-    dp.add_handler(CommandHandler("help", help_command))
-    dp.add_handler(CommandHandler("cancel", cancel_command))
-    dp.add_handler(CommandHandler("confirm", confirm_command))
-    dp.add_handler(CommandHandler("balance", balance_command))
-    dp.add_handler(CommandHandler("undo", undo_command))
-    dp.add_handler(CommandHandler("week", week_report))
-    dp.add_handler(CommandHandler("month", month_report))
-    dp.add_handler(CommandHandler("status", status_report))
-    dp.add_handler(CommandHandler("livestock", livestock_status_command))
-    dp.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
-
-    updater.start_webhook(
-        listen="0.0.0.0",
-        port=PORT,
-        url_path=BOT_TOKEN,
-    )
+    print("Starting Telegram bot with Flask webhook...")
 
     if WEBHOOK_URL:
         full_url = WEBHOOK_URL.rstrip("/") + "/" + BOT_TOKEN
         try:
-            # delete existing webhook to avoid Conflict
-            try:
-                updater.bot.delete_webhook()
-            except Exception as e_del:
-                print("Note: delete_webhook returned:", repr(e_del))
-
-            updater.bot.set_webhook(full_url)
+            bot.delete_webhook()
+        except Exception as e_del:
+            print("Note: delete_webhook returned:", repr(e_del))
+        try:
+            bot.set_webhook(full_url)
             print(f"Webhook set to: {full_url}")
         except Exception as e:
             print("ERROR setting webhook:", repr(e))
     else:
         print("WARNING: WEBHOOK_URL not set; Telegram might not reach the bot.")
 
-    updater.idle()
+    app.run(host="0.0.0.0", port=PORT)
 
 
 if __name__ == "__main__":
