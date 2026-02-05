@@ -3,9 +3,6 @@ import os
 import re
 import json
 from datetime import datetime, timedelta
-import threading
-import http.server
-import socketserver
 
 import gspread
 from google.oauth2.service_account import Credentials
@@ -17,6 +14,8 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 GOOGLE_SERVICE_ACCOUNT_JSON = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
 SHEET_ID = os.environ.get("SHEET_ID")
+PORT = int(os.environ.get("PORT", "10000"))
+WEBHOOK_URL = os.environ.get("WEBHOOK_URL")  # حط فيها رابط خدمة Render مثل https://my-bot.onrender.com
 
 if not all([BOT_TOKEN, OPENAI_API_KEY, GOOGLE_SERVICE_ACCOUNT_JSON, SHEET_ID]):
     raise RuntimeError(
@@ -35,6 +34,7 @@ USER_NAMES = {
 }
 
 # نخزن آخر رسالة تنتظر تأكيد لكل مستخدم
+# { user_id: {"text": str, "ai": dict} }
 PENDING_MESSAGES = {}
 
 
@@ -161,36 +161,57 @@ def extract_json_from_raw(raw_text):
 
 
 def analyze_with_ai(text):
+    """تحليل موحّد لكل شيء: عمليات مالية + استعلامات + مواشي."""
     today = datetime.now().date().isoformat()
     yesterday = (datetime.now().date() - timedelta(days=1)).isoformat()
 
     system_instructions = (
-        "أنت مساعد مالي لمزرعة وغنم. أعد فقط JSON صالح بدون أي تعليق.\n"
-        "استخدم السكيم التالي للأعمال المالية:\n"
+        "أنت مساعد محاسبي ومساعد لإدارة المواشي في مزرعة.\n"
+        "اقرأ رسالة المستخدم وحدد نيته بدقة، ثم أعد فقط JSON صالح بدون أي تعليق.\n\n"
+        "السكيم:\n"
         "{\n"
-        '  "should_save": true|false,\n'
-        '  "mode": "transaction"|"query"|"other",\n'
-        '  "date": "YYYY-MM-DD",\n'
-        '  "process": "شراء"|"بيع"|"فاتورة"|"راتب"|"أخرى",\n'
-        '  "type": "علف"|"منتجات"|"عمال"|"علاج"|"كهرباء"|"ماء"|"اخرى",\n'
-        '  "item": "وصف قصير",\n'
+        '  "intent": "expense_create" | "financial_query" | '
+        '            "livestock_baseline" | "livestock_change" | '
+        '            "livestock_status" | "other",\n'
+        '\n'
+        '  "date": "YYYY-MM-DD" أو null,\n'
+        '\n'
+        '  "process": "شراء"|"بيع"|"فاتورة"|"راتب"|"أخرى"|null,\n'
+        '  "type": "علف"|"منتجات"|"عمال"|"علاج"|"كهرباء"|"ماء"|"اخرى"|null,\n'
+        '  "item": نص قصير أو null,\n'
         '  "amount": رقم موجب أو null,\n'
-        '  "note": "نص",\n'
-        '  "query_mode": true|false,\n'
-        '  "query_process": "شراء"|"بيع"|"فاتورة"|"راتب"|"أخرى"|null,\n'
-        '  "query_type": "علف"|"منتجات"|"عمال"|"علاج"|"كهرباء"|"ماء"|"اخرى"|null,\n'
+        '  "note": نص أو null,\n'
+        '\n'
+        '  "query_period": "today"|"yesterday"|"this_week"|"last_7_days"|"this_month"|"all_time"|null,\n'
+        '  "query_process": مثل process أو null,\n'
+        '  "query_type": مثل type أو null,\n'
         '  "query_item": نص أو null,\n'
-        '  "query_period": "today"|"yesterday"|"this_week"|"last_7_days"|"this_month"|"all_time",\n'
-        '  "livestock_change_mode": true|false,\n'
-        '  "livestock_animal_type": "غنم"|"أبقار"|"ثور"|"ماعز"|"جمال"|"اخرى"|null,\n'
-        '  "livestock_breed": "حري"|"صلالي"|"صومالي"|"سوري"|"اضاحي"|"اخرى"|null,\n'
-        '  "livestock_delta": عدد صحيح\n'
+        '\n'
+        '  "livestock_entries": [\n'
+        "     {\n"
+        '       "animal_type": "غنم"|"أبقار"|"ثور"|"جمال"|"ماعز"|"اخرى",\n'
+        '       "breed": "حري"|"صلالي"|"صومالي"|"سوري"|"اضاحي"|"اخرى",\n'
+        '       "count": عدد صحيح موجب,\n'
+        '       "movement": "إجمالي"|"إضافة"|"نقص"|"بيع"|"نفوق"|"مواليد"\n'
+        "     }\n"
+        "  ] أو [],\n"
+        '\n'
+        '  "livestock_status_target": true|false\n'
         "}\n\n"
-        "التاريخ:\n"
-        f"- إذا قال أمس/امس → استخدم {yesterday}\n"
-        f"- إذا قال اليوم أو لم يذكر تاريخ → استخدم {today}\n"
-        "- إذا ذكر تاريخ صريح فحوّله إلى YYYY-MM-DD.\n"
-        "إذا لم تكن الرسالة عملية مالية يمكن حفظها، اجعل should_save = false.\n"
+        "اختر intent حسب معنى الرسالة:\n"
+        "- إذا كانت عملية مالية للحفظ في الدفتر (شراء، بيع، فاتورة، راتب...) → intent = \"expense_create\".\n"
+        "- إذا كان سؤال عن مبالغ (كم صرفت، كم ربحت، كم دخلت من بيع شيء...) → intent = \"financial_query\".\n"
+        "- إذا كانت رسالة حصر مثل: \"سجل العدد الكلي للمواشي\" → intent = \"livestock_baseline\" "
+        "وملّئ livestock_entries مع movement = \"إجمالي\".\n"
+        "- إذا كانت بيع/شراء/نفوق/مواليد لعدد محدد من المواشي بدون التركيز على المبلغ "
+        "أو مع مبلغ لكن التركيز على تعديل الأعداد → اجعل intent = \"expense_create\" إذا كان هناك مبلغ واضح، "
+        "مع تعبئة الحقول المالية، واملأ livestock_entries لتعديل الأعداد.\n"
+        "- إذا طلب المستخدم كشف أو حالة المواشي (مثل: اعطني كشف المواشي، كم عندي مواشي) "
+        "→ intent = \"livestock_status\".\n"
+        "- إذا كانت الرسالة تحتوي على تغيير في أعداد المواشي فقط بدون أي مبلغ واضح (مثل: نفق 2 حري) "
+        "→ intent = \"livestock_change\" واملأ livestock_entries بما يناسب.\n"
+        "- إذا كانت الرسالة لا تنطبق على ما سبق → intent = \"other\".\n\n"
+        f"لو قال اليوم أو لم يذكر تاريخ استخدم {today}, لو قال امس استخدم {yesterday}.\n"
     )
 
     user_block = json.dumps({"message": text}, ensure_ascii=False)
@@ -246,80 +267,33 @@ def analyze_with_ai(text):
     return data
 
 
-def analyze_livestock(text):
-    system_instructions = (
-        "أنت مساعد لإدارة المواشي في المزرعة. أعد فقط JSON صالح بدون أي تعليق.\n"
-        "السكيم:\n"
-        "{\n"
-        '  "date": "YYYY-MM-DD",\n'
-        '  "note": "نص",\n'
-        '  "entries": [\n'
-        "    {\n"
-        '      "animal_type": "غنم"|"أبقار"|"ثور"|"جمال"|"ماعز"|"اخرى",\n'
-        '      "breed": "حري"|"صلالي"|"صومالي"|"سوري"|"اضاحي"|"اخرى",\n'
-        '      "count": عدد صحيح موجب,\n'
-        '      "movement": "إجمالي"|"إضافة"|"نقص"|"بيع"|"نفوق"|"مواليد"\n'
-        "    }\n"
-        "  ]\n"
-        "}\n"
-        "إذا كانت الرسالة من نوع: سجل العدد الكلي للمواشي كالتالي: ... فاجعل movement = \"إجمالي\".\n"
-        "إذا لم يذكر تاريخ صريح استخدم تاريخ اليوم.\n"
+def has_explicit_date(text: str) -> bool:
+    if not isinstance(text, str):
+        return False
+    t = (
+        text.replace("إ", "ا")
+        .replace("أ", "ا")
+        .replace("آ", "ا")
+        .replace("ى", "ي")
     )
-
-    user_block = json.dumps({"message": text}, ensure_ascii=False)
-    prompt = system_instructions + "\n\nUserMessage:\n" + user_block
-
-    try:
-        resp = openai_client.responses.create(
-            model="gpt-4.1-mini",
-            input=prompt,
-            max_output_tokens=400,
-        )
-    except Exception as e:
-        raise RuntimeError(f"OpenAI API call failed (livestock): {e}")
-
-    raw = getattr(resp, "output_text", None)
-    if not raw:
-        try:
-            out = getattr(resp, "output", None)
-            if out and len(out) > 0:
-                first = out[0]
-                content = getattr(first, "content", None)
-                if isinstance(first, dict):
-                    content = first.get("content", content)
-                if isinstance(content, list) and len(content) > 0:
-                    c0 = content[0]
-                    text_field = getattr(c0, "text", None)
-                    if isinstance(c0, dict):
-                        text_field = (
-                            c0.get("text", text_field)
-                            or c0.get("content", text_field)
-                            or c0
-                        )
-                    if hasattr(text_field, "value"):
-                        raw = text_field.value
-                    elif isinstance(text_field, str):
-                        raw = text_field
-                    else:
-                        raw = str(text_field)
-                else:
-                    raw = str(first)
-        except Exception as e:
-            print("DEBUG: structured extraction failed livestock:", repr(e))
-            raw = None
-
-    if not raw:
-        raw = str(resp)
-
-    print("RAW_OPENAI_LIVESTOCK_RESPONSE:", raw)
-
-    data = extract_json_from_raw(raw)
-    if not isinstance(data, dict):
-        raise RuntimeError(f"AI returned non-dict JSON (livestock): {type(data)}")
-    return data
+    if re.search(r"\d{1,4}\s*[/-]\s*\d{1,2}(\s*[/-]\s*\d{1,4})?", t):
+        return True
+    keywords = ["امس", "قبل امس", "اليوم"]
+    return any(k in t for k in keywords)
 
 
-# ================== BALANCE HELPERS ==================
+def choose_date_from_ai(ai_date, original_text: str) -> str:
+    today = datetime.now().date()
+    if has_explicit_date(original_text):
+        if isinstance(ai_date, str):
+            m = re.match(r"\d{4}-\d{2}-\d{2}", ai_date.strip())
+            if m:
+                return m.group(0)
+        return today.isoformat()
+    return today.isoformat()
+
+
+# ================== BALANCE & EXPENSE HELPERS ==================
 def compute_balance_from_rows(rows):
     if len(rows) <= 1:
         return 0.0
@@ -350,44 +324,28 @@ def compute_previous_balance(sheet):
     return compute_balance_from_rows(rows)
 
 
-def has_explicit_date(text: str) -> bool:
-    if not isinstance(text, str):
-        return False
-    t = text.replace("إ", "ا").replace("أ", "ا").replace("آ", "ا")
-    if re.search(r"\d{1,4}\s*[/-]\s*\d{1,2}(\s*[/-]\s*\d{1,4})?", t):
-        return True
-    keywords = ["امس", "قبل امس", "اليوم"]
-    return any(k in t for k in keywords)
-
-
-def choose_date_from_ai(ai_date, original_text: str) -> str:
-    today = datetime.now().date()
-    if has_explicit_date(original_text):
-        if isinstance(ai_date, str):
-            m = re.match(r"\d{4}-\d{2}-\d{2}", ai_date.strip())
-            if m:
-                return m.group(0)
-        return today.isoformat()
-    return today.isoformat()
-
-
 # ================== LIVESTOCK SUMMARY ==================
+def _norm_arabic(s: str) -> str:
+    if not isinstance(s, str):
+        return ""
+    s = s.strip()
+    s = (
+        s.replace("أ", "ا")
+        .replace("إ", "ا")
+        .replace("آ", "ا")
+        .replace("ة", "ه")
+        .replace("ى", "ي")
+    )
+    s = re.sub(r"[^\u0621-\u063A\u0641-\u064A0-9]+", "", s)
+    return s
+
+
 def update_livestock_summary(animal_type: str, breed: str, count: int, movement: str):
-    import re as _re
-
-    def norm(s: str) -> str:
-        if not isinstance(s, str):
-            return ""
-        s = s.strip()
-        s = s.replace("أ", "ا").replace("إ", "ا").replace("آ", "ا")
-        s = s.replace("ة", "ه").replace("ى", "ي")
-        s = _re.sub(r"[^\u0621-\u063A\u0641-\u064A0-9]+", "", s)
-        return s
-
+    """تحديث تبويب المواشي - إجمالي حسب حركة واحدة."""
     animal_type_raw = animal_type or ""
     breed_raw = breed or ""
-    animal_type_n = norm(animal_type_raw)
-    breed_n = norm(breed_raw)
+    animal_type_n = _norm_arabic(animal_type_raw)
+    breed_n = _norm_arabic(breed_raw)
     movement = (movement or "").strip()
 
     try:
@@ -405,8 +363,8 @@ def update_livestock_summary(animal_type: str, breed: str, count: int, movement:
     for idx, row in enumerate(rows[1:], start=2):
         a_raw = row[0] or ""
         b_raw = row[1] or ""
-        a_n = norm(a_raw)
-        b_n = norm(b_raw)
+        a_n = _norm_arabic(a_raw)
+        b_n = _norm_arabic(b_raw)
         if a_n == animal_type_n:
             same_type_rows.append((idx, a_raw, b_raw, row))
         if a_n == animal_type_n and breed_n and b_n == breed_n:
@@ -489,7 +447,7 @@ def reply_livestock_status(update):
         return
 
     if not totals:
-        update.message.reply_text("ℹ️ لا توجد أي سجلات مواشي حالياً.")
+        update.message.reply_text("ℹ️ لا توجد أي سجلات مواشي حالياً في تبويب \"المواشي - إجمالي\".")
         return
 
     lines = []
@@ -504,327 +462,6 @@ def reply_livestock_status(update):
         + f"\n\nالمجموع الكلي لجميع الأنواع: {overall}"
     )
     update.message.reply_text(msg)
-
-
-# ================== COMMANDS ==================
-def start_command(update, context):
-    if not authorized(update):
-        update.message.reply_text("❌ غير مصرح لك باستخدام هذا البوت.")
-        return
-    update.message.reply_text(
-        "👋 أهلاً، هذا بوت المحاسبة للمزرعة.\n"
-        "• العمليات المالية في ورقة Azba Expenses (حتى العمود H فقط).\n"
-        "• أعداد المواشي الحالية في تبويب \"المواشي - إجمالي\".\n"
-        "• سجل حصر كامل برسالة مثل:\n"
-        "  سجل العدد الكلي للمواشي كالتالي: عدد (60) حري ...\n"
-        "• لعرض المواشي: /livestock أو اكتب: اعرض المواشي المسجلة.\n"
-    )
-
-
-def help_command(update, context):
-    if not authorized(update):
-        update.message.reply_text("❌ غير مصرح لك باستخدام هذا البوت.")
-        return
-
-    text = (
-        "📋 أوامر البوت:\n\n"
-        "🆘 /help - عرض قائمة الأوامر.\n"
-        "💰 /balance - عرض الرصيد الحالي.\n"
-        "↩️ /undo - حذف آخر عملية مالية (مع عكس تأثير المواشي إن وجد).\n"
-        "📅 /week - ملخص آخر 7 أيام.\n"
-        "📆 /month - ملخص هذا الشهر.\n"
-        "📊 /status - ملخص اليوم + الأسبوع + الشهر.\n"
-        "🐑 /livestock - عرض أعداد المواشي الحالية.\n"
-        "✅ /confirm - تأكيد وحفظ آخر رسالة.\n"
-        "❌ /cancel - إلغاء آخر رسالة قيد التأكيد.\n"
-    )
-    update.message.reply_text(text)
-
-
-def cancel_command(update, context):
-    user_id = update.message.from_user.id
-    if not authorized(update):
-        update.message.reply_text("❌ غير مصرح لك")
-        return
-
-    if user_id in PENDING_MESSAGES:
-        del PENDING_MESSAGES[user_id]
-        update.message.reply_text("❌ تم إلغاء العملية، لن يتم حفظ شيء.")
-    else:
-        update.message.reply_text("ℹ️ لا توجد عملية قيد التأكيد حالياً.")
-
-
-def confirm_command(update, context):
-    user_id = update.message.from_user.id
-    if not authorized(update):
-        update.message.reply_text("❌ غير مصرح لك")
-        return
-
-    pending = PENDING_MESSAGES.get(user_id)
-    if not pending:
-        update.message.reply_text("ℹ️ لا توجد رسالة قيد التأكيد. أرسل رسالة جديدة أولاً.")
-        return
-
-    text = pending["text"]
-    kind = pending.get("kind", "expense")
-
-    # ========= تأكيد عمليات المواشي (حصر كامل) =========
-    if kind == "livestock":
-        ai_data = pending.get("ai")
-        del PENDING_MESSAGES[user_id]
-
-        if not ai_data:
-            update.message.reply_text("❌ لا توجد بيانات مواشي صالحة للحفظ.")
-            return
-
-        entries = ai_data.get("entries") or []
-        if not isinstance(entries, list) or not entries:
-            update.message.reply_text("❌ لم أجد أي سجلات مواشي في الرسالة.")
-            return
-
-        date_str = choose_date_from_ai(ai_data.get("date"), text)
-
-        try:
-            sheet = get_livestock_summary_sheet()
-            sheet.clear()
-            sheet.append_row(
-                ["نوع الحيوان", "السلالة", "العدد الحالي"],
-                value_input_option="USER_ENTERED",
-            )
-
-            saved = 0
-            for e in entries:
-                animal_type = e.get("animal_type") or ""
-                breed = e.get("breed") or ""
-                count = e.get("count")
-                if count is None:
-                    continue
-                try:
-                    count_val = int(float(count))
-                    if count_val <= 0:
-                        continue
-                except Exception:
-                    continue
-
-                sheet.append_row(
-                    [animal_type, breed, count_val],
-                    value_input_option="USER_ENTERED",
-                )
-                saved += 1
-
-            if saved == 0:
-                update.message.reply_text(
-                    "❌ لم يتم حفظ أي بند، تأكد من صياغة رسالة الحصر."
-                )
-            else:
-                update.message.reply_text(
-                    f"✅ تم تحديث أعداد المواشي في تبويب \"المواشي - إجمالي\" ({saved} بنود).\n"
-                    f"التاريخ (للمعلومية فقط): {date_str}"
-                )
-        except Exception as e:
-            print("ERROR rebuilding livestock summary:", repr(e))
-            update.message.reply_text(
-                f"❌ حدث خطأ أثناء تحديث تبويب \"المواشي - إجمالي\":\n{e}"
-            )
-        return
-
-    # ========= تأكيد العمليات المالية =========
-    ai_data = pending.get("ai")
-    if not ai_data:
-        try:
-            ai_data = analyze_with_ai(text)
-        except Exception as e:
-            print("ERROR in analyze_with_ai:", repr(e))
-            update.message.reply_text(f"❌ OpenAI error:\n{e}")
-            del PENDING_MESSAGES[user_id]
-            return
-
-    del PENDING_MESSAGES[user_id]
-
-    if not ai_data.get("should_save", False):
-        update.message.reply_text(
-            "ℹ️ بعد التحليل تبيّن أنها ليست عملية مالية — لم يتم حفظ شيء."
-        )
-        return
-
-    date_str = choose_date_from_ai(ai_data.get("date"), text)
-    process = ai_data.get("process") or "أخرى"
-    type_ = ai_data.get("type") or "اخرى"
-    item = ai_data.get("item") or ""
-    amount = ai_data.get("amount")
-    note = ai_data.get("note") or text
-
-    if amount is None:
-        m = re.search(r"(\d+(?:[.,]\d+)?)", text)
-        if not m:
-            update.message.reply_text("❌ لم أقدر أستخرج مبلغ. اذكر المبلغ كرقم واضح.")
-            return
-        amount = float(m.group(1).replace(",", "."))
-
-    try:
-        amount = float(amount)
-        if amount < 0:
-            amount = abs(amount)
-    except Exception:
-        update.message.reply_text("❌ المبلغ غير واضح، ارسله كرقم فقط.")
-        return
-
-    person_name = USER_NAMES.get(
-        user_id, update.message.from_user.first_name or "مستخدم"
-    )
-
-    try:
-        sheet = get_expense_sheet()
-        rows = sheet.get_all_values()
-    except Exception as e:
-        update.message.reply_text(f"❌ خطأ في الوصول إلى Google Sheets: {e}")
-        return
-
-    prev_balance = compute_balance_from_rows(rows)
-    next_row_index = len(rows) + 1  # رقم الصف الذي سيتم إضافته الآن
-
-    signed_amount = amount if process == "بيع" else -amount
-    new_balance = round(prev_balance + signed_amount, 2)
-
-    # --- تعديل المواشي + تسجيل الميتا في ورقة منفصلة ---
-    livestock_msg = ""
-    if ai_data.get("livestock_change_mode"):
-        delta = ai_data.get("livestock_delta")
-        animal_type = ai_data.get("livestock_animal_type") or ""
-        breed = ai_data.get("livestock_breed") or ""
-        try:
-            if delta is not None:
-                delta_int = int(float(delta))
-            else:
-                delta_int = 0
-        except Exception:
-            delta_int = 0
-
-        if delta_int != 0:
-            movement = "بيع" if delta_int < 0 and process == "بيع" else "إضافة"
-            count_val = abs(delta_int)
-            try:
-                update_livestock_summary(animal_type, breed, count_val, movement)
-                sign_animals = "-" if delta_int < 0 else "+"
-                livestock_msg = (
-                    f"\n🐑 تم تعديل عدد المواشي في تبويب \"المواشي - إجمالي\": "
-                    f"{animal_type or '-'} | {breed or '-'} | {sign_animals}{count_val}"
-                )
-                log_livestock_meta(next_row_index, animal_type, breed, delta_int)
-            except Exception as e:
-                print("ERROR updating livestock summary from expense:", repr(e))
-                livestock_msg = (
-                    "\n⚠️ تم حفظ العملية المالية، لكن لم أستطع تحديث إجمالي المواشي."
-                )
-
-    # --- حفظ السطر في الشيت (A..H فقط) ---
-    try:
-        sheet.append_row(
-            [date_str, process, type_, item, amount, note, person_name, new_balance],
-            value_input_option="USER_ENTERED",
-        )
-    except Exception as e:
-        print("ERROR saving to sheet:", repr(e))
-        update.message.reply_text(f"❌ خطأ في الحفظ داخل Google Sheets:\n{e}")
-        return
-
-    sign_str = "+" if signed_amount >= 0 else "-"
-    msg = (
-        "✅ تم حفظ العملية في ورقة *Azba Expenses*:\n\n"
-        f"🗓 التاريخ: {date_str}\n"
-        f"🔁 نوع العملية: {process}\n"
-        f"🏷 التصنيف: {type_}\n"
-        f"📝 البند: {item or '-'}\n"
-        f"💰 المبلغ: {amount}\n"
-        f"👤 الشخص: {person_name}\n"
-        f"📊 الرصيد بعد العملية: {new_balance} (التغيير: {sign_str}{abs(signed_amount)})"
-        f"{livestock_msg}"
-    )
-    update.message.reply_text(msg)
-
-
-def balance_command(update, context):
-    user_id = update.message.from_user.id
-    if not authorized(update):
-        update.message.reply_text("❌ غير مصرح لك")
-        return
-
-    try:
-        sheet = get_expense_sheet()
-        balance = compute_previous_balance(sheet)
-    except Exception as e:
-        update.message.reply_text(f"❌ خطأ في قراءة الرصيد من Google Sheets:\n{e}")
-        return
-
-    update.message.reply_text(f"💰 الرصيد الحالي في الدفتر: {balance}")
-
-
-def undo_command(update, context):
-    user_id = update.message.from_user.id
-    if not authorized(update):
-        update.message.reply_text("❌ غير مصرح لك")
-        return
-
-    try:
-        sheet = get_expense_sheet()
-        rows = sheet.get_all_values()
-    except Exception as e:
-        update.message.reply_text(f"❌ خطأ في الوصول إلى Google Sheets:\n{e}")
-        return
-
-    if len(rows) <= 1:
-        update.message.reply_text("ℹ️ لا توجد أي عملية لحذفها (الجدول فارغ).")
-        return
-
-    last_row_index = len(rows)
-    last_row = rows[-1]
-
-    date_str = last_row[0] if len(last_row) > 0 else ""
-    process = last_row[1] if len(last_row) > 1 else ""
-    type_ = last_row[2] if len(last_row) > 2 else ""
-    item = last_row[3] if len(last_row) > 3 else ""
-    amount = last_row[4] if len(last_row) > 4 else ""
-    balance_value = last_row[7] if len(last_row) > 7 else ""
-
-    livestock_undo_msg = ""
-    meta_row_idx, meta = fetch_livestock_meta_for_row(last_row_index)
-    if meta:
-        try:
-            animal_type = meta.get("animal_type") or ""
-            breed = meta.get("breed") or ""
-            delta_int = int(float(meta.get("delta", 0)))
-            if delta_int != 0:
-                if delta_int < 0:
-                    movement = "إضافة"
-                    count = abs(delta_int)
-                    sign_str = "+"
-                else:
-                    movement = "نقص"
-                    count = delta_int
-                    sign_str = "-"
-                if count > 0:
-                    update_livestock_summary(animal_type, breed, count, movement)
-                    livestock_undo_msg = (
-                        f"\n🐑 تم عكس تعديل المواشي: {animal_type or '-'} | "
-                        f"{breed or '-'} | {sign_str}{count}"
-                    )
-                    if meta_row_idx:
-                        delete_meta_row(meta_row_idx)
-        except Exception as e:
-            print("ERROR undoing livestock from meta:", repr(e))
-
-    try:
-        sheet.delete_rows(last_row_index)
-        update.message.reply_text(
-            "↩️ تم التراجع عن آخر عملية وحذفها من Google Sheets:\n"
-            f"{date_str} | {process} | {type_} | {item or '-'} | {amount}\n"
-            f"الرصيد في الصف المحذوف كان: {balance_value}"
-            f"{livestock_undo_msg}\n"
-            "إذا كان هذا الحذف بالخطأ، تحتاج تعيد إدخال العملية مرة أخرى."
-        )
-    except Exception as e:
-        print("ERROR deleting last row:", repr(e))
-        update.message.reply_text(f"❌ تعذر حذف آخر عملية:\n{e}")
 
 
 # ================== REPORT HELPERS ==================
@@ -943,6 +580,465 @@ def answer_query_from_ai(update, ai_data, original_text):
     )
 
 
+# ================== PREVIEW MESSAGE ==================
+def send_preview_message(update, user_id, text, ai_data):
+    intent = ai_data.get("intent") or "other"
+
+    date_str = choose_date_from_ai(ai_data.get("date"), text)
+    process = ai_data.get("process") or "أخرى"
+    type_ = ai_data.get("type") or "اخرى"
+    item = ai_data.get("item") or ""
+    amount = ai_data.get("amount")
+
+    if amount is None:
+        m = re.search(r"(\d+(?:[.,]\d+)?)", text)
+        if m:
+            amount = float(m.group(1).replace(",", "."))
+    try:
+        if amount is not None:
+            amount = float(amount)
+            if amount < 0:
+                amount = abs(amount)
+    except Exception:
+        amount = None
+
+    person_name = USER_NAMES.get(
+        user_id, update.message.from_user.first_name or "مستخدم"
+    )
+
+    # حساب الرصيد المتوقع
+    try:
+        sheet = get_expense_sheet()
+        prev_balance = compute_previous_balance(sheet)
+    except Exception:
+        prev_balance = None
+
+    balance_preview = "سيتم حسابه عند الحفظ"
+    if intent == "expense_create" and amount is not None and prev_balance is not None:
+        signed_amount = amount if process == "بيع" else -amount
+        new_balance = round(prev_balance + signed_amount, 2)
+        sign_str = "+" if signed_amount >= 0 else "-"
+        balance_preview = (
+            f"{prev_balance} → {new_balance} (التغيير: {sign_str}{abs(signed_amount)})"
+        )
+
+    # معاينة تأثير المواشي إن وجد
+    livestock_entries = ai_data.get("livestock_entries") or []
+    livestock_preview_lines = []
+    for e in livestock_entries:
+        animal_type = e.get("animal_type") or "-"
+        breed = e.get("breed") or "-"
+        movement = e.get("movement") or ""
+        count = e.get("count")
+        try:
+            count_val = int(float(count)) if count is not None else None
+        except Exception:
+            count_val = None
+        if count_val is None:
+            continue
+        minus_moves = {"بيع", "نقص", "نفوق"}
+        sign = "-" if movement in minus_moves else "+"
+        livestock_preview_lines.append(
+            f"{animal_type} | {breed} | الحركة: {movement} | التغيير: {sign}{count_val}"
+        )
+
+    livestock_preview = ""
+    if livestock_preview_lines:
+        livestock_preview = "\n🐑 تأثير المواشي (متوقع):\n" + "\n".join(
+            livestock_preview_lines
+        )
+
+    amount_txt = str(amount) if amount is not None else "غير معروف (لم أستطع قراءته)"
+
+    if intent == "expense_create":
+        preview_msg = (
+            "📨 تأكيد العملية المالية\n"
+            f"رسالتك:\n\"{text}\"\n\n"
+            "سيتم تسجيل هذه العملية في ورقة *Azba Expenses* بالشكل التالي (تقريبي):\n\n"
+            f"🗓 التاريخ: {date_str}\n"
+            f"🔁 نوع العملية: {process}\n"
+            f"🏷 التصنيف: {type_}\n"
+            f"📝 البند: {item or '-'}\n"
+            f"💰 المبلغ: {amount_txt}\n"
+            f"👤 الشخص: {person_name}\n"
+            f"📊 الرصيد المتوقع بعد العملية: {balance_preview}"
+            f"{livestock_preview}\n\n"
+            "إذا موافق، أرسل /confirm\n"
+            "إذا لا، أرسل /cancel"
+        )
+    elif intent == "livestock_change":
+        preview_msg = (
+            "📨 تأكيد تعديل المواشي\n"
+            f"رسالتك:\n\"{text}\"\n\n"
+            "سيتم تطبيق التغييرات التالية على تبويب \"المواشي - إجمالي\":\n"
+            f"{livestock_preview or 'لا توجد تغييرات واضحة'}\n\n"
+            "لن يتم تسجيل عملية مالية في Azba Expenses (إلا إذا احتجتها لاحقاً).\n\n"
+            "إذا موافق، أرسل /confirm\n"
+            "إذا لا، أرسل /cancel"
+        )
+    elif intent == "livestock_baseline":
+        preview_msg = (
+            "📨 تأكيد تسجيل المواشي (حصر كامل)\n"
+            f"رسالتك:\n\"{text}\"\n\n"
+            f"{livestock_preview or 'لا توجد بيانات أعداد'}\n\n"
+            "إذا موافق، أرسل /confirm\n"
+            "إذا لا، أرسل /cancel"
+        )
+    else:
+        preview_msg = (
+            "لم أستطع تحديد نوع العملية بشكل واضح، جرب تعيد صياغة الرسالة أو استخدم /help."
+        )
+
+    update.message.reply_text(preview_msg)
+
+
+# ================== COMMANDS ==================
+def start_command(update, context):
+    if not authorized(update):
+        update.message.reply_text("❌ غير مصرح لك باستخدام هذا البوت.")
+        return
+    update.message.reply_text(
+        "👋 أهلاً، هذا بوت المحاسبة للمزرعة.\n"
+        "اكتب بشكل طبيعي، وأنا أوصل الكلام للذكاء الاصطناعي وهو يحدد المطلوب:\n"
+        "- تسجيل عملية مالية\n"
+        "- سؤال عن مبلغ\n"
+        "- حصر للمواشي\n"
+        "- تعديل أعداد المواشي\n"
+        "- أو كشف بأعداد المواشي الحالية\n\n"
+        "ثم أنفّذ لك اللي تريده على Google Sheets."
+    )
+
+
+def help_command(update, context):
+    if not authorized(update):
+        update.message.reply_text("❌ غير مصرح لك باستخدام هذا البوت.")
+        return
+
+    text = (
+        "📋 أمثلة على ما يمكنك كتابته:\n\n"
+        "💰 عمليات مالية:\n"
+        "  - شريت علف بـ 1000\n"
+        "  - بعت 3 أبقار بـ 4000\n\n"
+        "📊 أسئلة مالية:\n"
+        "  - كم صرفت على العلف هذا الشهر؟\n"
+        "  - كم دخل من بيع الأضاحي هذه السنة؟\n\n"
+        "🐑 مواشي:\n"
+        "  - سجل العدد الكلي للمواشي كالتالي: عدد (60) حري ...\n"
+        "  - نفق 2 حري\n"
+        "  - اعطني كشف المواشي\n\n"
+        "أوامر سريعة:\n"
+        "  /balance - عرض الرصيد الحالي\n"
+        "  /undo - التراجع عن آخر عملية مالية (مع عكس تعديل المواشي)\n"
+        "  /week - ملخص آخر 7 أيام\n"
+        "  /month - ملخص هذا الشهر\n"
+        "  /status - ملخص اليوم + الأسبوع + الشهر\n"
+        "  /livestock - عرض أعداد المواشي الحالية مباشرة\n"
+    )
+    update.message.reply_text(text)
+
+
+def cancel_command(update, context):
+    user_id = update.message.from_user.id
+    if not authorized(update):
+        update.message.reply_text("❌ غير مصرح لك")
+        return
+
+    if user_id in PENDING_MESSAGES:
+        del PENDING_MESSAGES[user_id]
+        update.message.reply_text("❌ تم إلغاء العملية، لن يتم حفظ شيء.")
+    else:
+        update.message.reply_text("ℹ️ لا توجد عملية قيد التأكيد حالياً.")
+
+
+def confirm_command(update, context):
+    user_id = update.message.from_user.id
+    if not authorized(update):
+        update.message.reply_text("❌ غير مصرح لك")
+        return
+
+    pending = PENDING_MESSAGES.get(user_id)
+    if not pending:
+        update.message.reply_text("ℹ️ لا توجد رسالة قيد التأكيد. أرسل رسالة جديدة أولاً.")
+        return
+
+    text = pending["text"]
+    ai_data = pending.get("ai") or {}
+    intent = ai_data.get("intent") or "other"
+
+    # نزيلها من pending فوراً
+    del PENDING_MESSAGES[user_id]
+
+    # ========= 1) حصر كامل للمواشي =========
+    if intent == "livestock_baseline":
+        livestock_entries = ai_data.get("livestock_entries") or []
+        if not isinstance(livestock_entries, list) or not livestock_entries:
+            update.message.reply_text("❌ لا توجد بيانات مواشي صالحة للحفظ.")
+            return
+
+        date_str = choose_date_from_ai(ai_data.get("date"), text)
+
+        try:
+            sheet = get_livestock_summary_sheet()
+            sheet.clear()
+            sheet.append_row(
+                ["نوع الحيوان", "السلالة", "العدد الحالي"],
+                value_input_option="USER_ENTERED",
+            )
+
+            saved = 0
+            for e in livestock_entries:
+                animal_type = e.get("animal_type") or ""
+                breed = e.get("breed") or ""
+                count = e.get("count")
+                try:
+                    count_val = int(float(count)) if count is not None else None
+                except Exception:
+                    count_val = None
+                if count_val is None or count_val <= 0:
+                    continue
+                sheet.append_row(
+                    [animal_type, breed, count_val],
+                    value_input_option="USER_ENTERED",
+                )
+                saved += 1
+
+            if saved == 0:
+                update.message.reply_text(
+                    "❌ لم يتم حفظ أي بند، تأكد من صياغة رسالة الحصر."
+                )
+            else:
+                update.message.reply_text(
+                    f"✅ تم تحديث أعداد المواشي في تبويب \"المواشي - إجمالي\" ({saved} بنود).\n"
+                    f"التاريخ (للمعلومية فقط): {date_str}"
+                )
+        except Exception as e:
+            print("ERROR rebuilding livestock summary:", repr(e))
+            update.message.reply_text(
+                f"❌ حدث خطأ أثناء تحديث تبويب \"المواشي - إجمالي\":\n{e}"
+            )
+        return
+
+    # ========= 2) تعديل مواشي بدون عملية مالية =========
+    if intent == "livestock_change":
+        livestock_entries = ai_data.get("livestock_entries") or []
+        if not isinstance(livestock_entries, list) or not livestock_entries:
+            update.message.reply_text("❌ لا توجد تغييرات مواشي واضحة لتطبيقها.")
+            return
+
+        applied = 0
+        for e in livestock_entries:
+            animal_type = e.get("animal_type") or ""
+            breed = e.get("breed") or ""
+            movement = e.get("movement") or ""
+            count = e.get("count")
+            try:
+                count_val = int(float(count)) if count is not None else None
+            except Exception:
+                count_val = None
+            if count_val is None or count_val <= 0:
+                continue
+            update_livestock_summary(animal_type, breed, count_val, movement)
+            applied += 1
+
+        if applied == 0:
+            update.message.reply_text("❌ لم يتم تطبيق أي تغيير، راجع صياغة الرسالة.")
+        else:
+            update.message.reply_text(
+                f"✅ تم تطبيق {applied} تغيير/تغييرات على أعداد المواشي في تبويب \"المواشي - إجمالي\"."
+            )
+        return
+
+    # ========= 3) عملية مالية (مع احتمال تعديل مواشي) =========
+    if intent == "expense_create":
+        date_str = choose_date_from_ai(ai_data.get("date"), text)
+        process = ai_data.get("process") or "أخرى"
+        type_ = ai_data.get("type") or "اخرى"
+        item = ai_data.get("item") or ""
+        amount = ai_data.get("amount")
+        note = ai_data.get("note") or text
+
+        if amount is None:
+            m = re.search(r"(\d+(?:[.,]\d+)?)", text)
+            if not m:
+                update.message.reply_text("❌ لم أقدر أستخرج مبلغ. اذكر المبلغ كرقم واضح.")
+                return
+            amount = float(m.group(1).replace(",", "."))
+
+        try:
+            amount = float(amount)
+            if amount < 0:
+                amount = abs(amount)
+        except Exception:
+            update.message.reply_text("❌ المبلغ غير واضح، ارسله كرقم فقط.")
+            return
+
+        person_name = USER_NAMES.get(
+            user_id, update.message.from_user.first_name or "مستخدم"
+        )
+
+        try:
+            sheet = get_expense_sheet()
+            rows = sheet.get_all_values()
+        except Exception as e:
+            update.message.reply_text(f"❌ خطأ في الوصول إلى Google Sheets: {e}")
+            return
+
+        prev_balance = compute_balance_from_rows(rows)
+        next_row_index = len(rows) + 1
+
+        signed_amount = amount if process == "بيع" else -amount
+        new_balance = round(prev_balance + signed_amount, 2)
+
+        # --- تعديل المواشي + تسجيل الميتا ---
+        livestock_entries = ai_data.get("livestock_entries") or []
+        livestock_msg_lines = []
+        for e in livestock_entries:
+            animal_type = e.get("animal_type") or ""
+            breed = e.get("breed") or ""
+            movement = e.get("movement") or ""
+            count = e.get("count")
+            try:
+                count_val = int(float(count)) if count is not None else None
+            except Exception:
+                count_val = None
+            if count_val is None or count_val <= 0:
+                continue
+
+            try:
+                update_livestock_summary(animal_type, breed, count_val, movement)
+                minus_moves = {"بيع", "نقص", "نفوق"}
+                sign = -1 if movement in minus_moves else 1
+                delta_int = sign * count_val
+                log_livestock_meta(next_row_index, animal_type, breed, delta_int)
+                sign_str = "+" if delta_int >= 0 else "-"
+                livestock_msg_lines.append(
+                    f"{animal_type or '-'} | {breed or '-'} | التغيير: {sign_str}{abs(delta_int)} (الحركة: {movement})"
+                )
+            except Exception as e:
+                print("ERROR updating livestock summary from expense:", repr(e))
+                livestock_msg_lines.append(
+                    f"{animal_type or '-'} | {breed or '-'} | ⚠️ لم أستطع تحديثه (خطأ داخلي)"
+                )
+
+        try:
+            sheet.append_row(
+                [date_str, process, type_, item, amount, note, person_name, new_balance],
+                value_input_option="USER_ENTERED",
+            )
+        except Exception as e:
+            print("ERROR saving to sheet:", repr(e))
+            update.message.reply_text(f"❌ خطأ في الحفظ داخل Google Sheets:\n{e}")
+            return
+
+        sign_str = "+" if signed_amount >= 0 else "-"
+        livestock_msg = ""
+        if livestock_msg_lines:
+            livestock_msg = "\n🐑 تعديل المواشي:\n" + "\n".join(livestock_msg_lines)
+
+        msg = (
+            "✅ تم حفظ العملية في ورقة *Azba Expenses*:\n\n"
+            f"🗓 التاريخ: {date_str}\n"
+            f"🔁 نوع العملية: {process}\n"
+            f"🏷 التصنيف: {type_}\n"
+            f"📝 البند: {item or '-'}\n"
+            f"💰 المبلغ: {amount}\n"
+            f"👤 الشخص: {person_name}\n"
+            f"📊 الرصيد بعد العملية: {new_balance} (التغيير: {sign_str}{abs(signed_amount)})"
+            f"{livestock_msg}"
+        )
+        update.message.reply_text(msg)
+        return
+
+    # أي intent آخر
+    update.message.reply_text(
+        "لم أستطع تنفيذ هذه العملية بعد التأكيد، لأن نوعها غير مدعوم حالياً."
+    )
+
+
+def balance_command(update, context):
+    user_id = update.message.from_user.id
+    if not authorized(update):
+        update.message.reply_text("❌ غير مصرح لك")
+        return
+
+    try:
+        sheet = get_expense_sheet()
+        balance = compute_previous_balance(sheet)
+    except Exception as e:
+        update.message.reply_text(f"❌ خطأ في قراءة الرصيد من Google Sheets:\n{e}")
+        return
+
+    update.message.reply_text(f"💰 الرصيد الحالي في الدفتر: {balance}")
+
+
+def undo_command(update, context):
+    user_id = update.message.from_user.id
+    if not authorized(update):
+        update.message.reply_text("❌ غير مصرح لك")
+        return
+
+    try:
+        sheet = get_expense_sheet()
+        rows = sheet.get_all_values()
+    except Exception as e:
+        update.message.reply_text(f"❌ خطأ في الوصول إلى Google Sheets:\n{e}")
+        return
+
+    if len(rows) <= 1:
+        update.message.reply_text("ℹ️ لا توجد أي عملية لحذفها (الجدول فارغ).")
+        return
+
+    last_row_index = len(rows)
+    last_row = rows[-1]
+
+    date_str = last_row[0] if len(last_row) > 0 else ""
+    process = last_row[1] if len(last_row) > 1 else ""
+    type_ = last_row[2] if len(last_row) > 2 else ""
+    item = last_row[3] if len(last_row) > 3 else ""
+    amount = last_row[4] if len(last_row) > 4 else ""
+    balance_value = last_row[7] if len(last_row) > 7 else ""
+
+    livestock_undo_msg = ""
+    meta_row_idx, meta = fetch_livestock_meta_for_row(last_row_index)
+    if meta:
+        try:
+            animal_type = meta.get("animal_type") or ""
+            breed = meta.get("breed") or ""
+            delta_int = int(float(meta.get("delta", 0)))
+            if delta_int != 0:
+                if delta_int < 0:
+                    movement = "إضافة"
+                    count = abs(delta_int)
+                    sign_str = "+"
+                else:
+                    movement = "نقص"
+                    count = delta_int
+                    sign_str = "-"
+                if count > 0:
+                    update_livestock_summary(animal_type, breed, count, movement)
+                    livestock_undo_msg = (
+                        f"\n🐑 تم عكس تعديل المواشي: {animal_type or '-'} | "
+                        f"{breed or '-'} | {sign_str}{count}"
+                    )
+                    if meta_row_idx:
+                        delete_meta_row(meta_row_idx)
+        except Exception as e:
+            print("ERROR undoing livestock from meta:", repr(e))
+
+    try:
+        sheet.delete_rows(last_row_index)
+        update.message.reply_text(
+            "↩️ تم التراجع عن آخر عملية وحذفها من Google Sheets:\n"
+            f"{date_str} | {process} | {type_} | {item or '-'} | {amount}\n"
+            f"الرصيد في الصف المحذوف كان: {balance_value}"
+            f"{livestock_undo_msg}\n"
+            "إذا كان هذا الحذف بالخطأ، تحتاج تعيد إدخال العملية مرة أخرى."
+        )
+    except Exception as e:
+        print("ERROR deleting last row:", repr(e))
+        update.message.reply_text(f"❌ تعذر حذف آخر عملية:\n{e}")
+
+
 def week_report(update, context):
     if not authorized(update):
         update.message.reply_text("❌ غير مصرح لك")
@@ -1028,28 +1124,32 @@ def handle_message(update, context):
 
     text = update.message.text
 
-    normalized = text.replace("إ", "ا").replace("أ", "ا").replace("آ", "ا")
-    if (
-        ("مواشي" in normalized or "المواشي" in normalized)
-        and any(k in normalized for k in ["اعرض", "عرض", "شوف", "المسجله", "المسجلة", "كم"])
-    ):
+    try:
+        ai_data = analyze_with_ai(text)
+    except Exception as e:
+        print("ERROR in analyze_with_ai:", repr(e))
+        update.message.reply_text(
+            "❌ صار خطأ أثناء تحليل الرسالة بالذكاء الاصطناعي، حاول مرة ثانية."
+        )
+        return
+
+    intent = ai_data.get("intent") or "other"
+    print("AI_INTENT:", intent)
+
+    # 1) كشف المواشي
+    if intent == "livestock_status":
         reply_livestock_status(update)
         return
 
-    if "سجل" in normalized and re.search(r"عدد\s*\(\d+\)", normalized):
-        try:
-            ai_livestock = analyze_livestock(text)
-        except Exception as e:
-            update.message.reply_text(f"❌ خطأ في تحليل نص المواشي:\n{e}")
-            return
-
-        entries = ai_livestock.get("entries") or []
-        if not isinstance(entries, list) or not entries:
+    # 2) حصر كامل للمواشي → نحتاج تأكيد
+    if intent == "livestock_baseline":
+        livestock_entries = ai_data.get("livestock_entries") or []
+        if not isinstance(livestock_entries, list) or not livestock_entries:
             update.message.reply_text("❌ لم أستطع فهم أعداد المواشي من الرسالة.")
             return
 
         lines = []
-        for e in entries:
+        for e in livestock_entries:
             animal_type = e.get("animal_type") or "-"
             breed = e.get("breed") or "-"
             count = e.get("count")
@@ -1065,14 +1165,10 @@ def handle_message(update, context):
             update.message.reply_text("❌ البيانات غير واضحة، لم أستطع استخراج الأعداد.")
             return
 
-        PENDING_MESSAGES[user_id] = {
-            "text": text,
-            "ai": ai_livestock,
-            "kind": "livestock",
-        }
+        PENDING_MESSAGES[user_id] = {"text": text, "ai": ai_data}
 
         update.message.reply_text(
-            "📨 تأكيد تسجيل المواشي\n"
+            "📨 تأكيد تسجيل المواشي (حصر كامل)\n"
             f"رسالتك:\n\"{text}\"\n\n"
             "سيتم تحديث الأعداد التالية في تبويب \"المواشي - إجمالي\":\n"
             + "\n".join(lines)
@@ -1081,144 +1177,37 @@ def handle_message(update, context):
         )
         return
 
-    # -------- تحليل مالي --------
-    try:
-        ai_data = analyze_with_ai(text)
-    except Exception as e:
-        print("ERROR in analyze_with_ai (handle_message):", repr(e))
-        PENDING_MESSAGES[user_id] = {"text": text, "kind": "expense"}
-        update.message.reply_text(
-            "📨 تأكيد العملية\n"
-            f"رسالتك:\n\"{text}\"\n\n"
-            "هل أنت متأكد أنك تريد حفظ هذه العملية في Google Sheets؟\n"
-            "إذا نعم، أرسل الأمر: /confirm\n"
-            "إذا لا، أرسل: /cancel"
-        )
+    # 3) تعديل مواشي فقط → تأكيد
+    if intent == "livestock_change":
+        livestock_entries = ai_data.get("livestock_entries") or []
+        if not isinstance(livestock_entries, list) or not livestock_entries:
+            update.message.reply_text("❌ لم أستطع فهم تغييرات المواشي من الرسالة.")
+            return
+
+        PENDING_MESSAGES[user_id] = {"text": text, "ai": ai_data}
+        send_preview_message(update, user_id, text, ai_data)
         return
 
-    if ai_data.get("query_mode"):
+    # 4) استعلام مالي
+    if intent == "financial_query":
         answer_query_from_ai(update, ai_data, text)
         return
 
-    if ai_data.get("should_save", False):
-        # معاينة واقعية لما سيتم كتابته في الشيت
-        date_str = choose_date_from_ai(ai_data.get("date"), text)
-        process = ai_data.get("process") or "أخرى"
-        type_ = ai_data.get("type") or "اخرى"
-        item = ai_data.get("item") or ""
-        amount = ai_data.get("amount")
-
-        # محاولة استخراج المبلغ مثل confirm_command
-        if amount is None:
-            m = re.search(r"(\d+(?:[.,]\d+)?)", text)
-            if m:
-                amount = float(m.group(1).replace(",", "."))
-        try:
-            if amount is not None:
-                amount = float(amount)
-                if amount < 0:
-                    amount = abs(amount)
-        except Exception:
-            amount = None
-
-        person_name = USER_NAMES.get(user_id, update.message.from_user.first_name or "مستخدم")
-
-        # حساب الرصيد المتوقع
-        try:
-            sheet = get_expense_sheet()
-            prev_balance = compute_previous_balance(sheet)
-        except Exception:
-            prev_balance = None
-
-        balance_preview = "سيتم حسابه عند الحفظ"
-        if amount is not None and prev_balance is not None:
-            signed_amount = amount if process == "بيع" else -amount
-            new_balance = round(prev_balance + signed_amount, 2)
-            sign_str = "+" if signed_amount >= 0 else "-"
-            balance_preview = (
-                f"{prev_balance} → {new_balance} (التغيير: {sign_str}{abs(signed_amount)})"
-            )
-
-        # معاينة تعديل المواشي (إن وجد)
-        livestock_preview = ""
-        if ai_data.get("livestock_change_mode"):
-            delta = ai_data.get("livestock_delta")
-            animal_type = ai_data.get("livestock_animal_type") or ""
-            breed = ai_data.get("livestock_breed") or ""
-            try:
-                if delta is not None:
-                    delta_int = int(float(delta))
-                else:
-                    delta_int = 0
-            except Exception:
-                delta_int = 0
-
-            if delta_int != 0:
-                sign_animals = "-" if delta_int < 0 else "+"
-                livestock_preview = (
-                    f"\n🐑 تأثير المواشي (متوقع): {animal_type or '-'} | "
-                    f"{breed or '-'} | {sign_animals}{abs(delta_int)}"
-                )
-
-        # حفظ الـ ai_data للـ /confirm
-        PENDING_MESSAGES[user_id] = {
-            "text": text,
-            "ai": ai_data,
-            "kind": "expense",
-        }
-
-        amount_txt = str(amount) if amount is not None else "غير معروف (لم أستطع قراءته)"
-
-        preview_msg = (
-            "📨 تأكيد العملية\n"
-            f"رسالتك:\n\"{text}\"\n\n"
-            "سيتم تسجيل هذه العملية في ورقة *Azba Expenses* بالشكل التالي (تقريبي):\n\n"
-            f"🗓 التاريخ: {date_str}\n"
-            f"🔁 نوع العملية: {process}\n"
-            f"🏷 التصنيف: {type_}\n"
-            f"📝 البند: {item or '-'}\n"
-            f"💰 المبلغ: {amount_txt}\n"
-            f"👤 الشخص: {person_name}\n"
-            f"📊 الرصيد المتوقع بعد العملية: {balance_preview}"
-            f"{livestock_preview}\n\n"
-            "إذا موافق، أرسل /confirm\n"
-            "إذا لا، أرسل /cancel"
-        )
-        update.message.reply_text(preview_msg)
+    # 5) عملية مالية (مع أو بدون مواشي)
+    if intent == "expense_create":
+        PENDING_MESSAGES[user_id] = {"text": text, "ai": ai_data}
+        send_preview_message(update, user_id, text, ai_data)
         return
 
+    # 6) أي شيء آخر
     update.message.reply_text(
-        "ℹ️ هذه الرسالة ليست عملية مالية ولا سؤال عن مبلغ ولا تسجيل مواشي.\n"
-        "اكتب عملية مثل: شريت علف بـ 100\n"
-        "أو اسأل عن مبلغ مثل: كم صرفت على العلف هذا الشهر؟\n"
-        "أو سجل المواشي مثل: سجل العدد الكلي للمواشي كالتالي: عدد (60) حري ...\n"
-        "أو اعرض المواشي المسجلة بكتابة: اعرض المواشي المسجلة أو استخدم /livestock."
+        "ℹ️ لم أفهم طلبك بشكل واضح، جرب تكتبها بطريقة أبسط أو استخدم /help."
     )
 
 
-# ================== HEALTH SERVER (لـ Render) ==================
-def start_health_server():
-    port = int(os.environ.get("PORT", "10000"))
-
-    class Handler(http.server.BaseHTTPRequestHandler):
-        def do_GET(self):
-            self.send_response(200)
-            self.send_header("Content-type", "text/plain; charset=utf-8")
-            self.end_headers()
-            self.wfile.write(b"OK")
-
-        def log_message(self, format, *args):
-            return
-
-    with socketserver.TCPServer(("", port), Handler) as httpd:
-        print(f"Health server running on port {port}")
-        httpd.serve_forever()
-
-
-# ================== MAIN ==================
+# ================== MAIN (Webhook) ==================
 def main():
-    server_thread = threading.Thread(target=start_health_server, daemon=True)
-    server_thread.start()
+    print("Starting Telegram bot with Webhook...")
 
     updater = Updater(BOT_TOKEN, use_context=True)
     dp = updater.dispatcher
@@ -1235,7 +1224,24 @@ def main():
     dp.add_handler(CommandHandler("livestock", livestock_status_command))
     dp.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
 
-    updater.start_polling()
+    # نبدأ الـ Webhook
+    # البوت يسمع على 0.0.0.0:PORT والمسار هو BOT_TOKEN
+    updater.start_webhook(
+        listen="0.0.0.0",
+        port=PORT,
+        url_path=BOT_TOKEN,
+    )
+
+    if WEBHOOK_URL:
+        full_url = WEBHOOK_URL.rstrip("/") + "/" + BOT_TOKEN
+        try:
+            updater.bot.set_webhook(full_url)
+            print(f"Webhook set to: {full_url}")
+        except Exception as e:
+            print("ERROR setting webhook:", repr(e))
+    else:
+        print("WARNING: WEBHOOK_URL not set; Telegram might not reach the bot.")
+
     updater.idle()
 
 
