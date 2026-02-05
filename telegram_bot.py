@@ -12,6 +12,7 @@ from google.oauth2.service_account import Credentials
 from telegram.ext import Updater, MessageHandler, Filters, CommandHandler
 from openai import OpenAI
 
+# ================== ENV ==================
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 GOOGLE_SERVICE_ACCOUNT_JSON = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
@@ -23,17 +24,21 @@ if not all([BOT_TOKEN, OPENAI_API_KEY, GOOGLE_SERVICE_ACCOUNT_JSON, SHEET_ID]):
         "GOOGLE_SERVICE_ACCOUNT_JSON / SHEET_ID"
     )
 
+# ================== CLIENTS ==============
 openai_client = OpenAI(api_key=OPENAI_API_KEY)
 
+# المستخدمين المصرح لهم
 ALLOWED_USERS = {47329648, 6894180427}
 USER_NAMES = {
     47329648: "خالد",
     6894180427: "حمد",
 }
 
+# نخزن آخر رسالة تنتظر تأكيد لكل مستخدم
 PENDING_MESSAGES = {}
 
 
+# ================== SHEETS HELPERS ==================
 def _get_gspread_client():
     info = json.loads(GOOGLE_SERVICE_ACCOUNT_JSON)
     scopes = [
@@ -68,6 +73,7 @@ def authorized(update):
     return update.message.from_user.id in ALLOWED_USERS
 
 
+# ================== AI HELPERS ==================
 def extract_json_from_raw(raw_text):
     if not isinstance(raw_text, str):
         raw_text = str(raw_text)
@@ -250,6 +256,7 @@ def analyze_livestock(text):
     return data
 
 
+# ================== BALANCE HELPERS ==================
 def compute_previous_balance(sheet):
     try:
         rows = sheet.get_all_values()
@@ -301,6 +308,7 @@ def choose_date_from_ai(ai_date, original_text: str) -> str:
     return today.isoformat()
 
 
+# ================== LIVESTOCK SUMMARY ==================
 def update_livestock_summary(animal_type: str, breed: str, count: int, movement: str):
     import re as _re
 
@@ -435,6 +443,7 @@ def reply_livestock_status(update):
     update.message.reply_text(msg)
 
 
+# ================== COMMANDS ==================
 def start_command(update, context):
     if not authorized(update):
         update.message.reply_text("❌ غير مصرح لك باستخدام هذا البوت.")
@@ -458,7 +467,7 @@ def help_command(update, context):
         "📋 أوامر البوت:\n\n"
         "🆘 /help - عرض قائمة الأوامر.\n"
         "💰 /balance - عرض الرصيد الحالي.\n"
-        "↩️ /undo - حذف آخر عملية مالية.\n"
+        "↩️ /undo - حذف آخر عملية مالية (مع عكس تأثير المواشي إن وجد).\n"
         "📅 /week - ملخص آخر 7 أيام.\n"
         "📆 /month - ملخص هذا الشهر.\n"
         "📊 /status - ملخص اليوم + الأسبوع + الشهر.\n"
@@ -496,6 +505,7 @@ def confirm_command(update, context):
     text = pending["text"]
     kind = pending.get("kind", "expense")
 
+    # ========= تأكيد عمليات المواشي (حصر كامل) =========
     if kind == "livestock":
         ai_data = pending.get("ai")
         del PENDING_MESSAGES[user_id]
@@ -513,6 +523,7 @@ def confirm_command(update, context):
 
         try:
             sheet = get_livestock_summary_sheet()
+            # RESET كامل للتبويب
             sheet.clear()
             sheet.append_row(
                 ["نوع الحيوان", "السلالة", "العدد الحالي"],
@@ -555,6 +566,7 @@ def confirm_command(update, context):
             )
         return
 
+    # ========= تأكيد العمليات المالية =========
     ai_data = pending.get("ai")
     if not ai_data:
         try:
@@ -609,17 +621,9 @@ def confirm_command(update, context):
     signed_amount = amount if process == "بيع" else -amount
     new_balance = round(prev_balance + signed_amount, 2)
 
-    try:
-        sheet.append_row(
-            [date_str, process, type_, item, amount, note, person_name, new_balance],
-            value_input_option="USER_ENTERED",
-        )
-    except Exception as e:
-        print("ERROR saving to sheet:", repr(e))
-        update.message.reply_text(f"❌ خطأ في الحفظ داخل Google Sheets:\n{e}")
-        return
-
+    # --- تعديل المواشي + تخزين الميتا عشان /undo ---
     livestock_msg = ""
+    livestock_meta = ""
     if ai_data.get("livestock_change_mode"):
         delta = ai_data.get("livestock_delta")
         animal_type = ai_data.get("livestock_animal_type") or ""
@@ -642,11 +646,28 @@ def confirm_command(update, context):
                     f"\n🐑 تم تعديل عدد المواشي: {animal_type or '-'} | "
                     f"{breed or '-'} | {sign_animals}{count_val}"
                 )
+                livestock_meta_dict = {
+                    "animal_type": animal_type,
+                    "breed": breed,
+                    "delta": delta_int,
+                }
+                livestock_meta = json.dumps(livestock_meta_dict, ensure_ascii=False)
             except Exception as e:
                 print("ERROR updating livestock summary from expense:", repr(e))
                 livestock_msg = (
                     "\n⚠️ تم حفظ العملية المالية، لكن لم أستطع تحديث إجمالي المواشي."
                 )
+
+    # --- حفظ السطر في الشيت (مع عمود الميتا) ---
+    try:
+        sheet.append_row(
+            [date_str, process, type_, item, amount, note, person_name, new_balance, livestock_meta],
+            value_input_option="USER_ENTERED",
+        )
+    except Exception as e:
+        print("ERROR saving to sheet:", repr(e))
+        update.message.reply_text(f"❌ خطأ في الحفظ داخل Google Sheets:\n{e}")
+        return
 
     sign_str = "+" if signed_amount >= 0 else "-"
     update.message.reply_text(
@@ -700,13 +721,43 @@ def undo_command(update, context):
     item = last_row[3] if len(last_row) > 3 else ""
     amount = last_row[4] if len(last_row) > 4 else ""
     balance_value = last_row[7] if len(last_row) > 7 else ""
+    livestock_meta_raw = last_row[8] if len(last_row) > 8 else ""
+
+    livestock_undo_msg = ""
+    if livestock_meta_raw:
+        try:
+            meta = json.loads(livestock_meta_raw)
+            animal_type = meta.get("animal_type") or ""
+            breed = meta.get("breed") or ""
+            delta = meta.get("delta")
+            if animal_type and delta is not None:
+                delta_int = int(float(delta))
+                if delta_int < 0:
+                    # كان ناقص العدد → نرجع نضيف
+                    movement = "إضافة"
+                    count = abs(delta_int)
+                    sign_str = "+"
+                else:
+                    # كان زيادة → نرجع ننقص
+                    movement = "نقص"
+                    count = int(delta_int)
+                    sign_str = "-"
+                if count > 0:
+                    update_livestock_summary(animal_type, breed, count, movement)
+                    livestock_undo_msg = (
+                        f"\n🐑 تم عكس تعديل المواشي: {animal_type or '-'} | "
+                        f"{breed or '-'} | {sign_str}{count}"
+                    )
+        except Exception as e:
+            print("ERROR undoing livestock change:", repr(e))
 
     try:
         sheet.delete_rows(last_row_index)
         update.message.reply_text(
             "↩️ تم التراجع عن آخر عملية وحذفها من Google Sheets:\n"
             f"{date_str} | {process} | {type_} | {item or '-'} | {amount}\n"
-            f"الرصيد في الصف المحذوف كان: {balance_value}\n"
+            f"الرصيد في الصف المحذوف كان: {balance_value}"
+            f"{livestock_undo_msg}\n"
             "إذا كان هذا الحذف بالخطأ، تحتاج تعيد إدخال العملية مرة أخرى."
         )
     except Exception as e:
@@ -714,6 +765,7 @@ def undo_command(update, context):
         update.message.reply_text(f"❌ تعذر حذف آخر عملية:\n{e}")
 
 
+# ================== REPORT HELPERS ==================
 def load_expenses():
     sheet = get_expense_sheet()
     rows = sheet.get_all_values()
@@ -905,6 +957,7 @@ def livestock_status_command(update, context):
         reply_livestock_status(update)
 
 
+# ================== MESSAGE HANDLER ==================
 def handle_message(update, context):
     user_id = update.message.from_user.id
     if not authorized(update):
@@ -1008,6 +1061,7 @@ def handle_message(update, context):
     )
 
 
+# ================== HEALTH SERVER (لـ Render) ==================
 def start_health_server():
     port = int(os.environ.get("PORT", "10000"))
 
@@ -1026,6 +1080,7 @@ def start_health_server():
         httpd.serve_forever()
 
 
+# ================== MAIN ==================
 def main():
     server_thread = threading.Thread(target=start_health_server, daemon=True)
     server_thread.start()
