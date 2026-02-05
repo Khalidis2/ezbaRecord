@@ -99,23 +99,23 @@ def analyze_with_ai(text):
         "أنت مساعد مالي لمزرعة وغنم. أعد فقط JSON صالح بدون أي تعليق.\n"
         "استخدم السكيم التالي للأعمال المالية:\n"
         "{\n"
-        '  "should_save": true|false,\n'
-        '  "mode": "transaction"|"query"|"other",\n'
-        '  "date": "YYYY-MM-DD",\n'
-        '  "process": "شراء"|"بيع"|"فاتورة"|"راتب"|"أخرى",\n'
-        '  "type": "علف"|"منتجات"|"عمال"|"علاج"|"كهرباء"|"ماء"|"اخرى",\n'
-        '  "item": "وصف قصير للشيء (بيض، حليب، علف، ...)",\n'
-        '  "amount": رقم موجب فقط أو null إذا غير معروف,\n'
-        '  "note": "نص",\n'
-        '  "query_mode": true|false,\n'
-        '  "query_process": "شراء"|"بيع"|"فاتورة"|"راتب"|"أخرى"|null,\n'
-        '  "query_type": "علف"|"منتجات"|"عمال"|"علاج"|"كهرباء"|"ماء"|"اخرى"|null,\n'
-        '  "query_item": نص أو null,\n'
-        '  "query_period": "today"|"yesterday"|"this_week"|"last_7_days"|"this_month"|"all_time",\n'
-        '  "livestock_change_mode": true|false,\n'
-        '  "livestock_animal_type": "غنم"|"أبقار"|"ثور"|"ماعز"|"جمال"|"اخرى"|null,\n'
-        '  "livestock_breed": "حري"|"صلالي"|"صومالي"|"سوري"|"اضاحي"|"اخرى"|null,\n'
-        '  "livestock_delta": عدد صحيح (سالب للبيع/النقص، موجب للإضافة، 0 أو null إذا لا يوجد تأثير)\n'
+        '  \"should_save\": true|false,\n'
+        '  \"mode\": \"transaction\"|\"query\"|\"other\",\n'
+        '  \"date\": \"YYYY-MM-DD\",\n'
+        '  \"process\": \"شراء\"|\"بيع\"|\"فاتورة\"|\"راتب\"|\"أخرى\",\n'
+        '  \"type\": \"علف\"|\"منتجات\"|\"عمال\"|\"علاج\"|\"كهرباء\"|\"ماء\"|\"اخرى\",\n'
+        '  \"item\": \"وصف قصير للشيء (بيض، حليب، علف، ...)\",\n'
+        '  \"amount\": رقم موجب فقط أو null إذا غير معروف,\n'
+        '  \"note\": \"نص\",\n'
+        '  \"query_mode\": true|false,\n'
+        '  \"query_process\": \"شراء\"|\"بيع\"|\"فاتورة\"|\"راتب\"|\"أخرى\"|null,\n'
+        '  \"query_type\": \"علف\"|\"منتجات\"|\"عمال\"|\"علاج\"|\"كهرباء\"|\"ماء\"|\"اخرى\"|null,\n'
+        '  \"query_item\": نص أو null,\n'
+        '  \"query_period\": \"today\"|\"yesterday\"|\"this_week\"|\"last_7_days\"|\"this_month\"|\"all_time\",\n'
+        '  \"livestock_change_mode\": true|false,\n'
+        '  \"livestock_animal_type\": \"غنم\"|\"أبقار\"|\"ثور\"|\"ماعز\"|\"جمال\"|\"اخرى\"|null,\n'
+        '  \"livestock_breed\": \"حري\"|\"صلالي\"|\"صومالي\"|\"سوري\"|\"اضاحي\"|\"اخرى\"|null,\n'
+        '  \"livestock_delta\": عدد صحيح (سالب للبيع/النقص، موجب للإضافة، 0 أو null إذا لا يوجد تأثير)\n'
         "}\n\n"
         "التاريخ:\n"
         f"- إذا قال أمس/امس → استخدم {yesterday}\n"
@@ -209,14 +209,14 @@ def analyze_livestock(text):
         "المطلوب: تحويل النص إلى قائمة سجلات مواشي.\n"
         "استخدم السكيم التالي:\n"
         "{\n"
-        '  "date": "YYYY-MM-DD",\n'
-        '  "note": "نص قصير يصف هذه العملية أو الصورة العامة",\n'
-        '  "entries": [\n'
+        '  \"date\": \"YYYY-MM-DD\",\n'
+        '  \"note\": \"نص قصير يصف هذه العملية أو الصورة العامة\",\n'
+        '  \"entries\": [\n'
         "    {\n"
-        '      "animal_type": "غنم"|"أبقار"|"ثور"|"جمال"|"ماعز"|"اخرى",\n'
-        '      "breed": "حري"|"صلالي"|"صومالي"|"سوري"|"اضاحي"|"اخرى",\n'
-        '      "count": عدد صحيح موجب,\n'
-        '      "movement": "إجمالي"|"إضافة"|"نقص"|"بيع"|"نفوق"|"مواليد"\n'
+        '      \"animal_type\": \"غنم\"|\"أبقار\"|\"ثور\"|\"جمال\"|\"ماعز\"|\"اخرى\",\n'
+        '      \"breed\": \"حري\"|\"صلالي\"|\"صومالي\"|\"سوري\"|\"اضاحي\"|\"اخرى\",\n'
+        '      \"count\": عدد صحيح موجب,\n'
+        '      \"movement\": \"إجمالي\"|\"إضافة\"|\"نقص\"|\"بيع\"|\"نفوق\"|\"مواليد\"\n'
         "    }\n"
         "  ]\n"
         "}\n\n"
@@ -334,6 +334,57 @@ def choose_date_from_ai(ai_date, original_text: str) -> str:
     return today.isoformat()
 
 
+def get_livestock_totals():
+    sheet = get_livestock_sheet()
+    rows = sheet.get_all_values()
+    totals = {}
+    for row in rows[1:]:
+        if len(row) < 4:
+            continue
+        animal = (row[1] or "").strip()
+        breed = (row[2] or "").strip()
+        count_str = (row[3] or "").strip()
+        if not count_str:
+            continue
+        try:
+            count = int(float(count_str))
+        except Exception:
+            continue
+        movement = (row[4] or "").strip() if len(row) > 4 else ""
+        if movement in ("بيع", "نقص", "نفوق"):
+            sign = -1
+        else:
+            sign = 1
+        key = (animal or "-", breed or "-")
+        totals[key] = totals.get(key, 0) + sign * count
+    return totals
+
+
+def reply_livestock_status(update):
+    try:
+        totals = get_livestock_totals()
+    except Exception as e:
+        update.message.reply_text(f"❌ خطأ في قراءة سجلات المواشي من Google Sheets:\n{e}")
+        return
+
+    if not totals:
+        update.message.reply_text("ℹ️ لا توجد أي سجلات مواشي حالياً في تبويب المواشي.")
+        return
+
+    lines = []
+    overall = 0
+    for (animal, breed), cnt in sorted(totals.items()):
+        overall += cnt
+        lines.append(f"{animal} | {breed}: {cnt}")
+
+    msg = (
+        "🐑 المواشي المسجّلة حالياً (صافي بعد الإضافات والبيع والنقص):\n"
+        + "\n".join(lines)
+        + f"\n\nالمجموع الكلي لجميع الأنواع: {overall}"
+    )
+    update.message.reply_text(msg)
+
+
 def start_command(update, context):
     if not authorized(update):
         update.message.reply_text("❌ غير مصرح لك باستخدام هذا البوت.")
@@ -343,6 +394,7 @@ def start_command(update, context):
         "اكتب أي عملية شراء أو بيع بالعربي، أو اسأل عن المصاريف والدخل.\n"
         "تقدر بعد تسجل عدد المواشي برسالة مثل:\n"
         "سجل العدد الكلي للمواشي كالتالي: عدد (60) حري ...\n"
+        "ولعرض المواشي المسجلة استخدم /livestock أو اكتب: اعرض المواشي المسجلة.\n"
         "افتراضياً يسجل التاريخ على اليوم، وإذا ذكرت تاريخ معين يحفظ على هذاك التاريخ.\n"
         "استخدم /help لرؤية كل الأوامر."
     )
@@ -361,6 +413,7 @@ def help_command(update, context):
         "📅 /week - ملخص آخر 7 أيام.\n"
         "📆 /month - ملخص هذا الشهر.\n"
         "📊 /status - ملخص اليوم + الأسبوع + الشهر.\n"
+        "🐑 /livestock - عرض عدد المواشي المسجلة حالياً.\n"
         "✅ /confirm - تأكيد وحفظ آخر رسالة.\n"
         "❌ /cancel - إلغاء آخر رسالة قيد التأكيد.\n\n"
         "مثال عملية بدون تاريخ (يُسجل على اليوم):\n"
@@ -373,6 +426,7 @@ def help_command(update, context):
         "عدد (60) حري\n"
         "عدد (8) صلالي\n"
         "عدد (7) أبقار\n"
+        "ولعرضها لاحقاً: /livestock أو اعرض المواشي المسجلة.\n"
     )
     update.message.reply_text(text)
 
@@ -813,6 +867,13 @@ def status_report(update, context):
     )
 
 
+def livestock_status_command(update, context):
+    if not authorized(update):
+        update.message.reply_text("❌ غير مصرح لك")
+        return
+    reply_livestock_status(update)
+
+
 def handle_message(update, context):
     user_id = update.message.from_user.id
     if not authorized(update):
@@ -820,6 +881,14 @@ def handle_message(update, context):
         return
 
     text = update.message.text
+
+    normalized = text.replace("إ", "ا").replace("أ", "ا").replace("آ", "ا")
+    if (
+        ("مواشي" in normalized or "المواشي" in normalized)
+        and any(k in normalized for k in ["اعرض", "عرض", "شوف", "المسجله", "المسجلة", "كم"])
+    ):
+        reply_livestock_status(update)
+        return
 
     if "سجل" in text and re.search(r"عدد\s*\(\d+\)", text):
         try:
@@ -903,7 +972,8 @@ def handle_message(update, context):
         "ℹ️ هذه الرسالة ليست عملية مالية ولا سؤال عن مبلغ ولا تسجيل مواشي.\n"
         "اكتب عملية مثل: شريت علف بـ 100\n"
         "أو اسأل عن مبلغ مثل: كم صرفت على العلف هذا الشهر؟\n"
-        "أو سجل المواشي مثل: سجل العدد الكلي للمواشي كالتالي: عدد (60) حري ..."
+        "أو سجل المواشي مثل: سجل العدد الكلي للمواشي كالتالي: عدد (60) حري ...\n"
+        "أو اعرض المواشي المسجلة بكتابة: اعرض المواشي المسجلة أو استخدم /livestock."
     )
 
 
@@ -941,6 +1011,7 @@ def main():
     dp.add_handler(CommandHandler("week", week_report))
     dp.add_handler(CommandHandler("month", month_report))
     dp.add_handler(CommandHandler("status", status_report))
+    dp.add_handler(CommandHandler("livestock", livestock_status_command))
     dp.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
 
     updater.start_polling()
