@@ -357,11 +357,17 @@ def choose_date_from_ai(ai_date, original_text: str) -> str:
 
 
 def update_livestock_summary(animal_type: str, breed: str, count: int, movement: str):
+    import re
+
     def norm(s: str) -> str:
         if not isinstance(s, str):
             return ""
         s = s.strip()
+        # توحيد بعض الحروف
         s = s.replace("أ", "ا").replace("إ", "ا").replace("آ", "ا")
+        s = s.replace("ة", "ه").replace("ى", "ي")
+        # إزالة كل شيء غير حروف عربية أو أرقام (مسافات، تشكيل، رموز…)
+        s = re.sub(r"[^\u0621-\u063A\u0641-\u064A0-9]+", "", s)
         return s
 
     animal_type = norm(animal_type)
@@ -378,6 +384,7 @@ def update_livestock_summary(animal_type: str, breed: str, count: int, movement:
     current_row_index = None
     current_value = 0
 
+    # نبحث عن صف يطابق نفس النوع + السلالة بعد التطبيع
     for idx, row in enumerate(rows[1:], start=2):
         a = norm(row[0] or "")
         b = norm(row[1] or "")
@@ -389,15 +396,18 @@ def update_livestock_summary(animal_type: str, breed: str, count: int, movement:
                 current_value = 0
             break
 
+    # لو الحركة "إجمالي" → نعتبرها ضبط مباشر للعدد
     if movement == "إجمالي":
         new_value = count
     else:
         minus_moves = {"بيع", "نقص", "نفوق"}
         sign = -1 if movement in minus_moves else 1
         new_value = current_value + sign * count
+        # لا نسمح أن العدد يكون أقل من صفر
         if new_value < 0:
             new_value = 0
 
+    # إذا لقينا صف قديم نحدّثه، غير كذا نضيف صف جديد
     if current_row_index is None:
         try:
             sheet.append_row(
@@ -411,7 +421,6 @@ def update_livestock_summary(animal_type: str, breed: str, count: int, movement:
             sheet.update_cell(current_row_index, 3, new_value)
         except Exception as e:
             print("ERROR updating summary row:", repr(e))
-
 
 def get_livestock_totals():
     sheet = get_livestock_summary_sheet()
