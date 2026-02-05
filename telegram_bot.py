@@ -1,24 +1,15 @@
 # file: telegram_bot.py
-# Telegram + OpenAI + Google Sheets bot with Flask webhook (Render-friendly)
-
 import os
 import re
 import json
+import threading
+import http.server
+import socketserver
 from datetime import datetime, timedelta
 
 import gspread
 from google.oauth2.service_account import Credentials
-
-from flask import Flask, request
-
-from telegram import Bot, Update
-from telegram.ext import (
-    Dispatcher,
-    CommandHandler,
-    MessageHandler,
-    Filters,
-)
-
+from telegram.ext import Updater, MessageHandler, Filters, CommandHandler
 from openai import OpenAI
 
 # ================== ENV ==================
@@ -26,8 +17,6 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 GOOGLE_SERVICE_ACCOUNT_JSON = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
 SHEET_ID = os.environ.get("SHEET_ID")
-PORT = int(os.environ.get("PORT", "10000"))
-WEBHOOK_URL = os.environ.get("WEBHOOK_URL")  # e.g. https://ezbarecord.onrender.com
 
 if not all([BOT_TOKEN, OPENAI_API_KEY, GOOGLE_SERVICE_ACCOUNT_JSON, SHEET_ID]):
     raise RuntimeError(
@@ -38,20 +27,17 @@ if not all([BOT_TOKEN, OPENAI_API_KEY, GOOGLE_SERVICE_ACCOUNT_JSON, SHEET_ID]):
 # ================== CLIENTS ==============
 openai_client = OpenAI(api_key=OPENAI_API_KEY)
 
-bot = Bot(BOT_TOKEN)
-dispatcher = Dispatcher(bot, None, workers=0, use_context=True)
-
-app = Flask(__name__)
-
-# Authorized users (Khaled and Hamad)
+# المستخدمين المصرح لهم
 ALLOWED_USERS = {47329648, 6894180427}
 USER_NAMES = {
     47329648: "خالد",
     6894180427: "حمد",
 }
 
-# Pending confirmations per user
+# نخزن آخر رسالة تنتظر تأكيد لكل مستخدم
+# { user_id: {"text": str, "ai": dict} }
 PENDING_MESSAGES = {}
+
 
 # ================== SHEETS HELPERS ==================
 def _get_gspread_client():
@@ -85,6 +71,7 @@ def get_livestock_summary_sheet():
 
 
 def get_meta_sheet():
+    """ورقة داخلية لتخزين ميتا المواشي لكل صف في Azba Expenses."""
     client_gs = _get_gspread_client()
     sh = client_gs.open_by_key(SHEET_ID)
     try:
@@ -99,6 +86,7 @@ def get_meta_sheet():
 
 
 def log_livestock_meta(row_index: int, animal_type: str, breed: str, delta: int):
+    """نسجل ارتباط صف Azba Expenses مع تعديل المواشي في ورقة Azba Meta."""
     try:
         meta_sheet = get_meta_sheet()
         meta_sheet.append_row(
@@ -110,6 +98,7 @@ def log_livestock_meta(row_index: int, animal_type: str, breed: str, delta: int)
 
 
 def fetch_livestock_meta_for_row(row_index: int):
+    """نرجع (meta_row_index_in_meta_sheet, meta_dict) لصف معيّن أو (None, None)."""
     try:
         meta_sheet = get_meta_sheet()
         rows = meta_sheet.get_all_values()
@@ -173,6 +162,7 @@ def extract_json_from_raw(raw_text):
 
 
 def analyze_with_ai(text):
+    """تحليل موحّد لكل شيء: عمليات مالية + استعلامات + مواشي."""
     today = datetime.now().date().isoformat()
     yesterday = (datetime.now().date() - timedelta(days=1)).isoformat()
 
@@ -352,6 +342,7 @@ def _norm_arabic(s: str) -> str:
 
 
 def update_livestock_summary(animal_type: str, breed: str, count: int, movement: str):
+    """تحديث تبويب المواشي - إجمالي حسب حركة واحدة."""
     animal_type_raw = animal_type or ""
     breed_raw = breed or ""
     animal_type_n = _norm_arabic(animal_type_raw)
@@ -616,6 +607,7 @@ def send_preview_message(update, user_id, text, ai_data):
         user_id, update.message.from_user.first_name or "مستخدم"
     )
 
+    # حساب الرصيد المتوقع
     try:
         sheet = get_expense_sheet()
         prev_balance = compute_previous_balance(sheet)
@@ -631,6 +623,7 @@ def send_preview_message(update, user_id, text, ai_data):
             f"{prev_balance} → {new_balance} (التغيير: {sign_str}{abs(signed_amount)})"
         )
 
+    # معاينة تأثير المواشي إن وجد
     livestock_entries = ai_data.get("livestock_entries") or []
     livestock_preview_lines = []
     for e in livestock_entries:
@@ -685,6 +678,7 @@ def send_preview_message(update, user_id, text, ai_data):
             "إذا لا، أرسل /cancel"
         )
     elif intent == "livestock_baseline":
+        # هذا الفرع عادة يُستخدم من handle_message مباشرة، لكن نتركه هنا للاكتمال
         preview_msg = (
             "📨 تأكيد تسجيل المواشي (حصر كامل)\n"
             f"رسالتك:\n\"{text}\"\n\n"
@@ -772,8 +766,11 @@ def confirm_command(update, context):
     text = pending["text"]
     ai_data = pending.get("ai") or {}
     intent = ai_data.get("intent") or "other"
+
+    # نزيلها من pending فوراً
     del PENDING_MESSAGES[user_id]
 
+    # ========= 1) حصر كامل للمواشي =========
     if intent == "livestock_baseline":
         livestock_entries = ai_data.get("livestock_entries") or []
         if not isinstance(livestock_entries, list) or not livestock_entries:
@@ -823,6 +820,7 @@ def confirm_command(update, context):
             )
         return
 
+    # ========= 2) تعديل مواشي بدون عملية مالية =========
     if intent == "livestock_change":
         livestock_entries = ai_data.get("livestock_entries") or []
         if not isinstance(livestock_entries, list) or not livestock_entries:
@@ -852,6 +850,7 @@ def confirm_command(update, context):
             )
         return
 
+    # ========= 3) عملية مالية (مع احتمال تعديل مواشي) =========
     if intent == "expense_create":
         date_str = choose_date_from_ai(ai_data.get("date"), text)
         process = ai_data.get("process") or "أخرى"
@@ -892,6 +891,7 @@ def confirm_command(update, context):
         signed_amount = amount if process == "بيع" else -amount
         new_balance = round(prev_balance + signed_amount, 2)
 
+        # --- تعديل المواشي + تسجيل الميتا ---
         livestock_entries = ai_data.get("livestock_entries") or []
         livestock_msg_lines = []
         for e in livestock_entries:
@@ -951,6 +951,7 @@ def confirm_command(update, context):
         update.message.reply_text(msg)
         return
 
+    # أي intent آخر
     update.message.reply_text(
         "لم أستطع تنفيذ هذه العملية بعد التأكيد، لأن نوعها غير مدعوم حالياً."
     )
@@ -1137,10 +1138,12 @@ def handle_message(update, context):
     intent = ai_data.get("intent") or "other"
     print("AI_INTENT:", intent)
 
+    # 1) كشف المواشي
     if intent == "livestock_status":
         reply_livestock_status(update)
         return
 
+    # 2) حصر كامل للمواشي → نحتاج تأكيد
     if intent == "livestock_baseline":
         livestock_entries = ai_data.get("livestock_entries") or []
         if not isinstance(livestock_entries, list) or not livestock_entries:
@@ -1176,6 +1179,7 @@ def handle_message(update, context):
         )
         return
 
+    # 3) تعديل مواشي فقط → تأكيد
     if intent == "livestock_change":
         livestock_entries = ai_data.get("livestock_entries") or []
         if not isinstance(livestock_entries, list) or not livestock_entries:
@@ -1186,67 +1190,75 @@ def handle_message(update, context):
         send_preview_message(update, user_id, text, ai_data)
         return
 
+    # 4) استعلام مالي
     if intent == "financial_query":
         answer_query_from_ai(update, ai_data, text)
         return
 
+    # 5) عملية مالية (مع أو بدون مواشي)
     if intent == "expense_create":
         PENDING_MESSAGES[user_id] = {"text": text, "ai": ai_data}
         send_preview_message(update, user_id, text, ai_data)
         return
 
+    # 6) أي شيء آخر
     update.message.reply_text(
         "ℹ️ لم أفهم طلبك بشكل واضح، جرب تكتبها بطريقة أبسط أو استخدم /help."
     )
 
 
-# ================== DISPATCHER SETUP ==================
-dispatcher.add_handler(CommandHandler("start", start_command))
-dispatcher.add_handler(CommandHandler("help", help_command))
-dispatcher.add_handler(CommandHandler("cancel", cancel_command))
-dispatcher.add_handler(CommandHandler("confirm", confirm_command))
-dispatcher.add_handler(CommandHandler("balance", balance_command))
-dispatcher.add_handler(CommandHandler("undo", undo_command))
-dispatcher.add_handler(CommandHandler("week", week_report))
-dispatcher.add_handler(CommandHandler("month", month_report))
-dispatcher.add_handler(CommandHandler("status", status_report))
-dispatcher.add_handler(CommandHandler("livestock", livestock_status_command))
-dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
+# ================== HEALTH SERVER (لـ Render) ==================
+def start_health_server():
+    port = int(os.environ.get("PORT", "10000"))
 
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-type", "text/plain; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(b"OK")
 
-# ================== FLASK ROUTES (WEBHOOK) ==================
-@app.route("/" + BOT_TOKEN, methods=["POST"])
-def telegram_webhook():
-    data = request.get_json(force=True)
-    update = Update.de_json(data, bot)
-    dispatcher.process_update(update)
-    return "OK"
+        def log_message(self, format, *args):
+            return
 
-
-@app.route("/", methods=["GET"])
-def index():
-    return "Ezba bot is running."
+    with socketserver.TCPServer(("", port), Handler) as httpd:
+        print(f"Health server running on port {port}")
+        httpd.serve_forever()
 
 
 # ================== MAIN ==================
 def main():
-    print("Starting Telegram bot with Flask webhook...")
+    # سيرفر صحة لـ Render
+    server_thread = threading.Thread(target=start_health_server, daemon=True)
+    server_thread.start()
 
-    if WEBHOOK_URL:
-        full_url = WEBHOOK_URL.rstrip("/") + "/" + BOT_TOKEN
-        try:
-            bot.delete_webhook()
-        except Exception as e_del:
-            print("Note: delete_webhook returned:", repr(e_del))
-        try:
-            bot.set_webhook(full_url)
-            print(f"Webhook set to: {full_url}")
-        except Exception as e:
-            print("ERROR setting webhook:", repr(e))
-    else:
-        print("WARNING: WEBHOOK_URL not set; Telegram might not reach the bot.")
+    print("Starting Telegram bot...")
+    updater = Updater(BOT_TOKEN, use_context=True)
+    dp = updater.dispatcher
 
-    app.run(host="0.0.0.0", port=PORT)
+    dp.add_handler(CommandHandler("start", start_command))
+    dp.add_handler(CommandHandler("help", help_command))
+    dp.add_handler(CommandHandler("cancel", cancel_command))
+    dp.add_handler(CommandHandler("confirm", confirm_command))
+    dp.add_handler(CommandHandler("balance", balance_command))
+    dp.add_handler(CommandHandler("undo", undo_command))
+    dp.add_handler(CommandHandler("week", week_report))
+    dp.add_handler(CommandHandler("month", month_report))
+    dp.add_handler(CommandHandler("status", status_report))
+    dp.add_handler(CommandHandler("livestock", livestock_status_command))
+    dp.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
+
+    # نحذف أي Webhook قديم
+    try:
+        updater.bot.delete_webhook()
+        me = updater.bot.get_me()
+        print(f"Bot connected as @{me.username}")
+    except Exception as e:
+        print("ERROR connecting to Telegram:", repr(e))
+
+    updater.start_polling()
+    print("Bot is now polling for updates...")
+    updater.idle()
 
 
 if __name__ == "__main__":
