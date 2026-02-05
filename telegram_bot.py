@@ -79,15 +79,21 @@ def analyze_with_ai(text):
 
     system_instructions = (
         "أنت مساعد مالي لمزرعة وغنم. أعد فقط JSON صالح بدون أي تعليق.\n"
-        "استخدم السكيم التالي:\n"
+        "استخدم السكيم التالي للأعمال المالية:\n"
         "{\n"
         '  \"should_save\": true|false,\n'
+        '  \"mode\": \"transaction\"|\"query\"|\"other\",\n'
         '  \"date\": \"YYYY-MM-DD\",\n'
         '  \"process\": \"شراء\"|\"بيع\"|\"فاتورة\"|\"راتب\"|\"أخرى\",\n'
         '  \"type\": \"علف\"|\"منتجات\"|\"عمال\"|\"علاج\"|\"كهرباء\"|\"ماء\"|\"اخرى\",\n'
         '  \"item\": \"وصف قصير للشيء (بيض، حليب، علف، ...)\",\n'
-        '  \"amount\": رقم موجب فقط,\n'
-        '  \"note\": \"نص\"\n'
+        '  \"amount\": رقم موجب فقط أو null إذا غير معروف،\n'
+        '  \"note\": \"نص\",\n'
+        '  \"query_mode\": true|false,\n'
+        '  \"query_process\": \"شراء\"|\"بيع\"|\"فاتورة\"|\"راتب\"|\"أخرى\"|null,\n'
+        '  \"query_type\": \"علف\"|\"منتجات\"|\"عمال\"|\"علاج\"|\"كهرباء\"|\"ماء\"|\"اخرى\"|null,\n'
+        '  \"query_item\": نص أو null,\n'
+        '  \"query_period\": \"today\"|\"yesterday\"|\"this_week\"|\"last_7_days\"|\"this_month\"|\"all_time\"\n'
         "}\n\n"
         "التاريخ:\n"
         f"- إذا قال أمس/امس → استخدم {yesterday}\n"
@@ -108,8 +114,16 @@ def analyze_with_ai(text):
         "- ماء: ماء، مويه.\n"
         "- اخرى: غير ذلك.\n\n"
         "amount:\n"
-        "- دائماً رقم موجب (بدون سالب).\n"
-        "إذا لم تكن الرسالة عملية مالية، اجعل should_save = false."
+        "- دائماً رقم موجب (بدون سالب).\n\n"
+        "وضعيات الرسالة:\n"
+        "- إذا كانت الرسالة تصف عملية شراء/بيع/مصروف/دخل حالية → mode = \"transaction\" و should_save = true.\n"
+        "- إذا كانت الرسالة سؤال عن مبلغ سابق مثل: \"كم صرفت/شريت/بعت علف هالشهر؟\" أو \"كم دخلنا من بيع البيض الأسبوع اللي فات؟\" →\n"
+        "  حينها mode = \"query\" و query_mode = true و should_save = false.\n"
+        "  حدّد في query_process نوع العملية المناسبة (غالباً شراء للمصاريف أو بيع للدخل)،\n"
+        "  و query_type أو query_item حسب الكلام،\n"
+        "  و query_period حسب الكلام (اليوم، أمس، هذا الأسبوع، آخر 7 أيام، هذا الشهر، أو كل الوقت).\n"
+        "- إذا لم تكن الرسالة متعلقة بالمال إطلاقاً → mode = \"other\" و should_save = false و query_mode = false.\n"
+        "إذا لم تكن الرسالة عملية مالية يمكن حفظها، اجعل should_save = false دائماً."
     )
 
     user_block = json.dumps({"message": text}, ensure_ascii=False)
@@ -210,6 +224,7 @@ def start_command(update, context):
         "👋 أهلاً، هذا بوت المحاسبة للمزرعة.\n"
         "اكتب أي عملية شراء أو بيع بالعربي بشكل طبيعي في هذه المحادثة أو في القروب.\n"
         "البوت راح يرسل لك رسالة تأكيد، وبعدها تستخدم /confirm للحفظ.\n"
+        "تقدر بعد تسأل أسئلة مثل: كم صرفت على العلف هذا الشهر؟ والبوت يحسب لك من الدفتر.\n"
         "استخدم /help لرؤية كل الأوامر."
     )
 
@@ -247,7 +262,11 @@ def help_command(update, context):
         "2️⃣ البوت يرسل لك رسالة تأكيد.\n"
         "3️⃣ إذا موافق، أرسل /confirm ليتم التحليل والحفظ.\n"
         "4️⃣ إذا ما تبي تحفظها، أرسل /cancel.\n"
-        "5️⃣ إذا حفظت شيء بالغلط، استخدم /undo لحذف آخر عملية محفوظة.\n"
+        "5️⃣ إذا حفظت شيء بالغلط، استخدم /undo لحذف آخر عملية محفوظة.\n\n"
+        "❓ أمثلة للأسئلة الذكية (استعلام فقط بدون حفظ):\n"
+        "• كم صرفت على العلف هذا الشهر؟\n"
+        "• كم دخلنا من بيع البيض هذا الأسبوع؟\n"
+        "• كم شريت علف هالشهر؟\n"
     )
     update.message.reply_text(text)
 
@@ -277,14 +296,18 @@ def confirm_command(update, context):
         return
 
     text = pending["text"]
-    del PENDING_MESSAGES[user_id]
 
-    try:
-        ai_data = analyze_with_ai(text)
-    except Exception as e:
-        print("ERROR in analyze_with_ai:", repr(e))
-        update.message.reply_text(f"❌ OpenAI error:\n{e}")
-        return
+    ai_data = pending.get("ai")
+    if not ai_data:
+        try:
+            ai_data = analyze_with_ai(text)
+        except Exception as e:
+            print("ERROR in analyze_with_ai:", repr(e))
+            update.message.reply_text(f"❌ OpenAI error:\n{e}")
+            return
+
+    # بعد التأكيد، نحذف من الـ pending
+    del PENDING_MESSAGES[user_id]
 
     if not ai_data.get("should_save", False):
         update.message.reply_text(
@@ -401,25 +424,6 @@ def undo_command(update, context):
         update.message.reply_text(f"❌ تعذر حذف آخر عملية:\n{e}")
 
 
-# ================== MESSAGE HANDLER ==================
-def handle_message(update, context):
-    user_id = update.message.from_user.id
-    if not authorized(update):
-        update.message.reply_text("❌ غير مصرح لك")
-        return
-
-    text = update.message.text
-    PENDING_MESSAGES[user_id] = {"text": text}
-
-    update.message.reply_text(
-        "📨 تأكيد العملية\n"
-        f"رسالتك:\n\"{text}\"\n\n"
-        "هل أنت متأكد أنك تريد حفظ هذه العملية في Google Sheets؟\n"
-        "إذا نعم، أرسل الأمر: /confirm\n"
-        "إذا لا، أرسل: /cancel"
-    )
-
-
 # ================== REPORT HELPERS ==================
 def load_expenses():
     sheet = get_sheet()
@@ -430,6 +434,8 @@ def load_expenses():
             continue
         date_str = row[0].strip()
         process = row[1].strip() if len(row) > 1 and row[1] else ""
+        type_ = row[2].strip() if len(row) > 2 and row[2] else ""
+        item = row[3].strip() if len(row) > 3 and row[3] else ""
         amount_str = row[4].strip()
         if not date_str or not amount_str:
             continue
@@ -438,7 +444,9 @@ def load_expenses():
             amount = float(str(amount_str).replace(",", ""))
         except Exception:
             continue
-        expenses.append({"date": d, "amount": amount, "process": process})
+        expenses.append(
+            {"date": d, "amount": amount, "process": process, "type": type_, "item": item}
+        )
     return expenses
 
 
@@ -459,6 +467,77 @@ def summarize_period(expenses, start_date, end_date):
             net -= amt
 
     return round(income, 2), round(expense, 2), round(net, 2)
+
+
+def answer_query_from_ai(update, ai_data, original_text):
+    try:
+        expenses = load_expenses()
+    except Exception as e:
+        update.message.reply_text(f"❌ خطأ في قراءة البيانات من Google Sheets:\n{e}")
+        return
+
+    today = datetime.now().date()
+    period = ai_data.get("query_period") or "all_time"
+
+    if period == "today":
+        start = end = today
+        period_label = "اليوم"
+    elif period == "yesterday":
+        d = today - timedelta(days=1)
+        start = end = d
+        period_label = "أمس"
+    elif period in ("this_week", "last_7_days"):
+        start = today - timedelta(days=6)
+        end = today
+        period_label = "آخر 7 أيام"
+    elif period == "this_month":
+        start = datetime(today.year, today.month, 1).date()
+        end = today
+        period_label = "هذا الشهر"
+    else:
+        start = datetime(1970, 1, 1).date()
+        end = today
+        period_label = "كل الفترة"
+
+    q_process = ai_data.get("query_process") or None
+    q_type = ai_data.get("query_type") or None
+    q_item = ai_data.get("query_item") or None
+
+    total = 0.0
+    count = 0
+
+    for e in expenses:
+        if not (start <= e["date"] <= end):
+            continue
+        if q_process and e["process"] != q_process:
+            continue
+        if q_type and e.get("type") != q_type:
+            continue
+        if q_item and q_item not in (e.get("item") or ""):
+            continue
+        total += e["amount"]
+        count += 1
+
+    if q_process == "شراء":
+        proc_txt = "المشتريات"
+    elif q_process == "بيع":
+        proc_txt = "المبيعات"
+    elif q_process:
+        proc_txt = f"عمليات {q_process}"
+    else:
+        proc_txt = "العمليات"
+
+    detail_txt = ""
+    if q_item:
+        detail_txt = f" لـ {q_item}"
+    elif q_type and q_type != "اخرى":
+        detail_txt = f" ({q_type})"
+
+    update.message.reply_text(
+        "📊 نتيجة سؤالك:\n"
+        f"إجمالي {proc_txt}{detail_txt} في {period_label}: {total}\n"
+        f"عدد العمليات المحسوبة: {count}"
+    )
 
 
 # ================== REPORT COMMANDS ==================
@@ -528,6 +607,55 @@ def status_report(update, context):
         f"الدخل: +{inc_month}\n"
         f"المصاريف: -{exp_month}\n"
         f"الصافي: {net_month:+}"
+    )
+
+
+# ================== MESSAGE HANDLER ==================
+def handle_message(update, context):
+    user_id = update.message.from_user.id
+    if not authorized(update):
+        update.message.reply_text("❌ غير مصرح لك")
+        return
+
+    text = update.message.text
+
+    try:
+        ai_data = analyze_with_ai(text)
+    except Exception as e:
+        print("ERROR in analyze_with_ai (handle_message):", repr(e))
+        # في حال فشل الـ AI، نرجع للسلوك القديم (تأكيد يدوي فقط)
+        PENDING_MESSAGES[user_id] = {"text": text}
+        update.message.reply_text(
+            "📨 تأكيد العملية\n"
+            f"رسالتك:\n\"{text}\"\n\n"
+            "هل أنت متأكد أنك تريد حفظ هذه العملية في Google Sheets؟\n"
+            "إذا نعم، أرسل الأمر: /confirm\n"
+            "إذا لا، أرسل: /cancel"
+        )
+        return
+
+    # إذا كانت الرسالة استعلام (سؤال عن مبلغ)
+    if ai_data.get("query_mode"):
+        answer_query_from_ai(update, ai_data, text)
+        return
+
+    # إذا كانت عملية مالية قابلة للحفظ
+    if ai_data.get("should_save", False):
+        PENDING_MESSAGES[user_id] = {"text": text, "ai": ai_data}
+        update.message.reply_text(
+            "📨 تأكيد العملية\n"
+            f"رسالتك:\n\"{text}\"\n\n"
+            "هل أنت متأكد أنك تريد حفظ هذه العملية في Google Sheets؟\n"
+            "إذا نعم، أرسل الأمر: /confirm\n"
+            "إذا لا، أرسل: /cancel"
+        )
+        return
+
+    # ليست عملية مالية ولا استعلام
+    update.message.reply_text(
+        "ℹ️ هذه الرسالة ليست عملية مالية ولا سؤال عن مبلغ.\n"
+        "اكتب عملية مثل: شريت علف بـ 100\n"
+        "أو اسأل عن مبلغ مثل: كم صرفت على العلف هذا الشهر؟"
     )
 
 
