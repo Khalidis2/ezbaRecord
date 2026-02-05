@@ -69,6 +69,69 @@ def get_livestock_summary_sheet():
     return ws
 
 
+def get_meta_sheet():
+    """ورقة داخلية لتخزين ميتا المواشي لكل صف في Azba Expenses."""
+    client_gs = _get_gspread_client()
+    sh = client_gs.open_by_key(SHEET_ID)
+    try:
+        ws = sh.worksheet("Azba Meta")
+    except gspread.WorksheetNotFound:
+        ws = sh.add_worksheet(title="Azba Meta", rows=1000, cols=4)
+        ws.append_row(
+            ["Row", "AnimalType", "Breed", "Delta"],
+            value_input_option="USER_ENTERED",
+        )
+    return ws
+
+
+def log_livestock_meta(row_index: int, animal_type: str, breed: str, delta: int):
+    """نسجل ارتباط صف Azba Expenses مع تعديل المواشي في ورقة Azba Meta."""
+    try:
+        meta_sheet = get_meta_sheet()
+        meta_sheet.append_row(
+            [row_index, animal_type or "", breed or "", delta],
+            value_input_option="USER_ENTERED",
+        )
+    except Exception as e:
+        print("ERROR logging livestock meta:", repr(e))
+
+
+def fetch_livestock_meta_for_row(row_index: int):
+    """نرجع (meta_row_index_in_meta_sheet, meta_dict) لصف معيّن أو (None, None)."""
+    try:
+        meta_sheet = get_meta_sheet()
+        rows = meta_sheet.get_all_values()
+    except Exception as e:
+        print("ERROR reading Azba Meta:", repr(e))
+        return None, None
+
+    for idx, row in enumerate(rows[1:], start=2):
+        if not row:
+            continue
+        row_id_str = (row[0] or "").strip()
+        try:
+            rid = int(row_id_str)
+        except Exception:
+            continue
+        if rid == row_index:
+            meta = {
+                "animal_type": row[1] if len(row) > 1 else "",
+                "breed": row[2] if len(row) > 2 else "",
+                "delta": int(float(row[3])) if len(row) > 3 and row[3] else 0,
+            }
+            return idx, meta
+
+    return None, None
+
+
+def delete_meta_row(meta_row_index: int):
+    try:
+        meta_sheet = get_meta_sheet()
+        meta_sheet.delete_rows(meta_row_index)
+    except Exception as e:
+        print("ERROR deleting meta row:", repr(e))
+
+
 def authorized(update):
     return update.message.from_user.id in ALLOWED_USERS
 
@@ -257,15 +320,9 @@ def analyze_livestock(text):
 
 
 # ================== BALANCE HELPERS ==================
-def compute_previous_balance(sheet):
-    try:
-        rows = sheet.get_all_values()
-    except Exception:
-        return 0.0
-
+def compute_balance_from_rows(rows):
     if len(rows) <= 1:
         return 0.0
-
     balance = 0.0
     for row in rows[1:]:
         if len(row) < 5:
@@ -278,13 +335,19 @@ def compute_previous_balance(sheet):
             amt = float(str(amount_str).replace(",", ""))
         except Exception:
             continue
-
         if proc == "بيع":
             balance += amt
         else:
             balance -= amt
-
     return round(balance, 2)
+
+
+def compute_previous_balance(sheet):
+    try:
+        rows = sheet.get_all_values()
+    except Exception:
+        return 0.0
+    return compute_balance_from_rows(rows)
 
 
 def has_explicit_date(text: str) -> bool:
@@ -450,7 +513,7 @@ def start_command(update, context):
         return
     update.message.reply_text(
         "👋 أهلاً، هذا بوت المحاسبة للمزرعة.\n"
-        "• العمليات المالية في ورقة Azba Expenses.\n"
+        "• العمليات المالية في ورقة Azba Expenses (حتى العمود H فقط).\n"
         "• أعداد المواشي الحالية في تبويب \"المواشي - إجمالي\".\n"
         "• سجل حصر كامل برسالة مثل:\n"
         "  سجل العدد الكلي للمواشي كالتالي: عدد (60) حري ...\n"
@@ -523,7 +586,6 @@ def confirm_command(update, context):
 
         try:
             sheet = get_livestock_summary_sheet()
-            # RESET كامل للتبويب
             sheet.clear()
             sheet.append_row(
                 ["نوع الحيوان", "السلالة", "العدد الحالي"],
@@ -613,17 +675,19 @@ def confirm_command(update, context):
 
     try:
         sheet = get_expense_sheet()
+        rows = sheet.get_all_values()
     except Exception as e:
         update.message.reply_text(f"❌ خطأ في الوصول إلى Google Sheets: {e}")
         return
 
-    prev_balance = compute_previous_balance(sheet)
+    prev_balance = compute_balance_from_rows(rows)
+    next_row_index = len(rows) + 1  # رقم الصف الذي سيتم إضافته الآن
+
     signed_amount = amount if process == "بيع" else -amount
     new_balance = round(prev_balance + signed_amount, 2)
 
-    # --- تعديل المواشي + تخزين الميتا عشان /undo ---
+    # --- تعديل المواشي + تسجيل الميتا في ورقة منفصلة ---
     livestock_msg = ""
-    livestock_meta = ""
     if ai_data.get("livestock_change_mode"):
         delta = ai_data.get("livestock_delta")
         animal_type = ai_data.get("livestock_animal_type") or ""
@@ -646,22 +710,17 @@ def confirm_command(update, context):
                     f"\n🐑 تم تعديل عدد المواشي: {animal_type or '-'} | "
                     f"{breed or '-'} | {sign_animals}{count_val}"
                 )
-                livestock_meta_dict = {
-                    "animal_type": animal_type,
-                    "breed": breed,
-                    "delta": delta_int,
-                }
-                livestock_meta = json.dumps(livestock_meta_dict, ensure_ascii=False)
+                log_livestock_meta(next_row_index, animal_type, breed, delta_int)
             except Exception as e:
                 print("ERROR updating livestock summary from expense:", repr(e))
                 livestock_msg = (
                     "\n⚠️ تم حفظ العملية المالية، لكن لم أستطع تحديث إجمالي المواشي."
                 )
 
-    # --- حفظ السطر في الشيت (مع عمود الميتا) ---
+    # --- حفظ السطر في الشيت (A..H فقط) ---
     try:
         sheet.append_row(
-            [date_str, process, type_, item, amount, note, person_name, new_balance, livestock_meta],
+            [date_str, process, type_, item, amount, note, person_name, new_balance],
             value_input_option="USER_ENTERED",
         )
     except Exception as e:
@@ -721,26 +780,22 @@ def undo_command(update, context):
     item = last_row[3] if len(last_row) > 3 else ""
     amount = last_row[4] if len(last_row) > 4 else ""
     balance_value = last_row[7] if len(last_row) > 7 else ""
-    livestock_meta_raw = last_row[8] if len(last_row) > 8 else ""
 
     livestock_undo_msg = ""
-    if livestock_meta_raw:
+    meta_row_idx, meta = fetch_livestock_meta_for_row(last_row_index)
+    if meta:
         try:
-            meta = json.loads(livestock_meta_raw)
             animal_type = meta.get("animal_type") or ""
             breed = meta.get("breed") or ""
-            delta = meta.get("delta")
-            if animal_type and delta is not None:
-                delta_int = int(float(delta))
+            delta_int = int(float(meta.get("delta", 0)))
+            if delta_int != 0:
                 if delta_int < 0:
-                    # كان ناقص العدد → نرجع نضيف
                     movement = "إضافة"
                     count = abs(delta_int)
                     sign_str = "+"
                 else:
-                    # كان زيادة → نرجع ننقص
                     movement = "نقص"
-                    count = int(delta_int)
+                    count = delta_int
                     sign_str = "-"
                 if count > 0:
                     update_livestock_summary(animal_type, breed, count, movement)
@@ -748,8 +803,10 @@ def undo_command(update, context):
                         f"\n🐑 تم عكس تعديل المواشي: {animal_type or '-'} | "
                         f"{breed or '-'} | {sign_str}{count}"
                     )
+                    if meta_row_idx:
+                        delete_meta_row(meta_row_idx)
         except Exception as e:
-            print("ERROR undoing livestock change:", repr(e))
+            print("ERROR undoing livestock from meta:", repr(e))
 
     try:
         sheet.delete_rows(last_row_index)
