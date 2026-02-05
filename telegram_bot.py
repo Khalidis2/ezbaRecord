@@ -46,6 +46,7 @@ def get_expense_sheet():
     return client_gs.open_by_key(SHEET_ID).sheet1
 
 
+# هذا كان يستخدم لتبويب الحركات "المواشي" – تركناه احتياط لكن لن نستخدمه
 def get_livestock_log_sheet():
     info = json.loads(GOOGLE_SERVICE_ACCOUNT_JSON)
     scopes = [
@@ -497,7 +498,6 @@ def start_command(update, context):
     update.message.reply_text(
         "👋 أهلاً، هذا بوت المحاسبة للمزرعة.\n"
         "• العمليات المالية تُحفظ في شيت Azba Expenses.\n"
-        "• تبويب \"المواشي\" = سجل حركات المواشي.\n"
         "• تبويب \"المواشي - إجمالي\" = العدد الحالي لكل نوع/سلالة.\n"
         "• تقدر تسجل حصر كامل برسالة مثل:\n"
         "  سجل العدد الكلي للمواشي كالتالي: عدد (60) حري ...\n"
@@ -562,6 +562,7 @@ def confirm_command(update, context):
     text = pending["text"]
     kind = pending.get("kind", "expense")
 
+    # ✅ وضع المواشي: يعدّل إجمالي المواشي فقط، بدون كتابة في تبويب "المواشي"
     if kind == "livestock":
         ai_data = pending.get("ai")
         del PENDING_MESSAGES[user_id]
@@ -576,15 +577,8 @@ def confirm_command(update, context):
             return
 
         date_str = choose_date_from_ai(ai_data.get("date"), text)
-        note = ai_data.get("note") or text
-
-        try:
-            log_sheet = get_livestock_log_sheet()
-        except Exception as e:
-            update.message.reply_text(f"❌ خطأ في الوصول إلى شيت المواشي:\n{e}")
-            return
-
         saved = 0
+
         for e in entries:
             animal_type = e.get("animal_type") or ""
             breed = e.get("breed") or ""
@@ -600,24 +594,21 @@ def confirm_command(update, context):
                 continue
 
             try:
-                log_sheet.append_row(
-                    [date_str, animal_type, breed, count_val, movement, note],
-                    value_input_option="USER_ENTERED",
-                )
                 update_livestock_summary(animal_type, breed, count_val, movement)
                 saved += 1
             except Exception as ex:
-                print("ERROR saving livestock row:", repr(ex))
+                print("ERROR updating livestock summary:", repr(ex))
 
         if saved == 0:
-            update.message.reply_text("❌ لم يتم حفظ أي سجل مواشي، تحقق من الرسالة.")
+            update.message.reply_text("❌ لم يتم تعديل أي عدد في المواشي، تحقق من الرسالة.")
         else:
             update.message.reply_text(
-                f"✅ تم حفظ سجلات المواشي ({saved} صفوف) في تبويب \"المواشي\" وتحديث \"المواشي - إجمالي\".\n"
-                f"التاريخ: {date_str}"
+                f"✅ تم تحديث أعداد المواشي في تبويب \"المواشي - إجمالي\" ({saved} بنود).\n"
+                f"التاريخ (للمعلومية فقط): {date_str}"
             )
         return
 
+    # باقي الكود كما هو لعمليات المصاريف …
     ai_data = pending.get("ai")
     if not ai_data:
         try:
@@ -683,6 +674,7 @@ def confirm_command(update, context):
         return
 
     livestock_msg = ""
+    # ✅ التعديل التلقائي لأعداد المواشي من عملية مالية، بدون تخزين سجل حركة
     if ai_data.get("livestock_change_mode"):
         delta = ai_data.get("livestock_delta")
         animal_type = ai_data.get("livestock_animal_type") or ""
@@ -699,28 +691,16 @@ def confirm_command(update, context):
             movement = "بيع" if delta_int < 0 and process == "بيع" else "إضافة"
             count_val = abs(delta_int)
             try:
-                log_sheet = get_livestock_log_sheet()
-                log_sheet.append_row(
-                    [
-                        date_str,
-                        animal_type,
-                        breed,
-                        count_val,
-                        movement,
-                        f"تلقائي من عملية مالية: {note}",
-                    ],
-                    value_input_option="USER_ENTERED",
-                )
                 update_livestock_summary(animal_type, breed, count_val, movement)
                 sign_animals = "-" if delta_int < 0 else "+"
                 livestock_msg = (
-                    f"\n🐑 تم تسجيل حركة مواشي: {animal_type or '-'} | "
+                    f"\n🐑 تم تعديل عدد المواشي: {animal_type or '-'} | "
                     f"{breed or '-'} | {sign_animals}{count_val}"
                 )
             except Exception as e:
-                print("ERROR saving livestock auto row:", repr(e))
+                print("ERROR updating livestock summary from expense:", repr(e))
                 livestock_msg = (
-                    "\n⚠️ تم حفظ العملية المالية، لكن لم أستطع تحديث شيت المواشي."
+                    "\n⚠️ تم حفظ العملية المالية، لكن لم أستطع تحديث إجمالي المواشي."
                 )
 
     sign_str = "+" if signed_amount >= 0 else "-"
@@ -976,8 +956,8 @@ def status_report(update, context):
 def livestock_status_command(update, context):
     if not authorized(update):
         update.message.reply_text("❌ غير مصرح لك")
-        return
-    reply_livestock_status(update)
+    else:
+        reply_livestock_status(update)
 
 
 def handle_message(update, context):
@@ -1034,7 +1014,7 @@ def handle_message(update, context):
         update.message.reply_text(
             "📨 تأكيد تسجيل المواشي\n"
             f"رسالتك:\n\"{text}\"\n\n"
-            "سيتم حفظ السجلات التالية في تبويب \"المواشي\" وتحديث \"المواشي - إجمالي\":\n"
+            "سيتم تحديث الأعداد التالية في تبويب \"المواشي - إجمالي\":\n"
             + "\n".join(lines)
             + "\n\nإذا موافق، أرسل /confirm\n"
             "إذا لا، أرسل /cancel"
