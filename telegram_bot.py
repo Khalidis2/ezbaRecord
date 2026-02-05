@@ -25,9 +25,10 @@ if not all([BOT_TOKEN, OPENAI_API_KEY, GOOGLE_SERVICE_ACCOUNT_JSON, SHEET_ID]):
 
 openai_client = OpenAI(api_key=OPENAI_API_KEY)
 
-ALLOWED_USERS = {47329648}
+ALLOWED_USERS = {47329648, 6894180427}
 USER_NAMES = {
-    47329648: "أنت",
+    47329648: "Khaled",
+    6894180427: "Hamad"
 }
 
 PENDING_MESSAGES = {}
@@ -766,7 +767,7 @@ def handle_message(update, context):
 
     text = update.message.text
 
-    if "المواشي" in text and "سجل" in text and "عدد" in text:
+if "سجل" in text and re.search(r"عدد\s*\(\d+\)", text):
         try:
             ai_livestock = analyze_livestock(text)
         except Exception as e:
