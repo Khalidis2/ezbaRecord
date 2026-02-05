@@ -12,6 +12,7 @@ from google.oauth2.service_account import Credentials
 from telegram.ext import Updater, MessageHandler, Filters, CommandHandler
 from openai import OpenAI
 
+# ================== ENV ==================
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 GOOGLE_SERVICE_ACCOUNT_JSON = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
@@ -23,19 +24,22 @@ if not all([BOT_TOKEN, OPENAI_API_KEY, GOOGLE_SERVICE_ACCOUNT_JSON, SHEET_ID]):
         "GOOGLE_SERVICE_ACCOUNT_JSON / SHEET_ID"
     )
 
+# ================== CLIENTS ==============
 openai_client = OpenAI(api_key=OPENAI_API_KEY)
 
+# المستخدمين المصرح لهم
 ALLOWED_USERS = {47329648, 6894180427}
-
 USER_NAMES = {
     47329648: "خالد",
     6894180427: "حمد",
 }
 
+# نخزن آخر رسالة تنتظر تأكيد لكل مستخدم
 PENDING_MESSAGES = {}
 
 
-def get_expense_sheet():
+# ================== SHEETS HELPERS ==================
+def _get_gspread_client():
     info = json.loads(GOOGLE_SERVICE_ACCOUNT_JSON)
     scopes = [
         "https://www.googleapis.com/auth/spreadsheets",
@@ -43,38 +47,16 @@ def get_expense_sheet():
     ]
     creds = Credentials.from_service_account_info(info, scopes=scopes)
     client_gs = gspread.authorize(creds)
+    return client_gs
+
+
+def get_expense_sheet():
+    client_gs = _get_gspread_client()
     return client_gs.open_by_key(SHEET_ID).sheet1
 
 
-# هذا كان يستخدم لتبويب الحركات "المواشي" – تركناه احتياط لكن لن نستخدمه
-def get_livestock_log_sheet():
-    info = json.loads(GOOGLE_SERVICE_ACCOUNT_JSON)
-    scopes = [
-        "https://www.googleapis.com/auth/spreadsheets",
-        "https://www.googleapis.com/auth/drive",
-    ]
-    creds = Credentials.from_service_account_info(info, scopes=scopes)
-    client_gs = gspread.authorize(creds)
-    sh = client_gs.open_by_key(SHEET_ID)
-    try:
-        ws = sh.worksheet("المواشي")
-    except gspread.WorksheetNotFound:
-        ws = sh.add_worksheet(title="المواشي", rows=1000, cols=6)
-        ws.append_row(
-            ["التاريخ", "نوع الحيوان", "السلالة", "العدد", "نوع الحركة", "ملاحظة"],
-            value_input_option="USER_ENTERED",
-        )
-    return ws
-
-
 def get_livestock_summary_sheet():
-    info = json.loads(GOOGLE_SERVICE_ACCOUNT_JSON)
-    scopes = [
-        "https://www.googleapis.com/auth/spreadsheets",
-        "https://www.googleapis.com/auth/drive",
-    ]
-    creds = Credentials.from_service_account_info(info, scopes=scopes)
-    client_gs = gspread.authorize(creds)
+    client_gs = _get_gspread_client()
     sh = client_gs.open_by_key(SHEET_ID)
     try:
         ws = sh.worksheet("المواشي - إجمالي")
@@ -91,6 +73,7 @@ def authorized(update):
     return update.message.from_user.id in ALLOWED_USERS
 
 
+# ================== AI HELPERS ==================
 def extract_json_from_raw(raw_text):
     if not isinstance(raw_text, str):
         raw_text = str(raw_text)
@@ -144,27 +127,7 @@ def analyze_with_ai(text):
         f"- إذا قال أمس/امس → استخدم {yesterday}\n"
         f"- إذا قال اليوم أو لم يذكر تاريخ → استخدم {today}\n"
         "- إذا ذكر تاريخ صريح فحوّله إلى YYYY-MM-DD.\n\n"
-        "process:\n"
-        "- شراء: عند شراء أي شيء.\n"
-        "- بيع: عند بيع أي شيء.\n"
-        "- فاتورة: كهرباء، ماء، صيانة، فواتير.\n"
-        "- راتب: رواتب العمال.\n"
-        "- أخرى: أي شيء غير ذلك.\n\n"
-        "type:\n"
-        "- علف: علف، شعير، برسيم، تبن، مركزات.\n"
-        "- منتجات: بيض، حليب، لحم، صوف، سمن، أو بيع حيوانات مثل أضاحي.\n"
-        "- عمال: رواتب أو مصاريف العمال.\n"
-        "- علاج: دواء، علاج، بيطري.\n"
-        "- كهرباء: كهرب، مولد.\n"
-        "- ماء: ماء، مويه.\n"
-        "- اخرى: غير ذلك.\n\n"
-        "amount:\n"
-        "- دائماً رقم موجب (بدون سالب).\n\n"
-        "وضعيات الرسالة:\n"
-        "- إذا كانت الرسالة تصف عملية مالية حالية → mode = \"transaction\" و should_save = true.\n"
-        "- إذا كانت الرسالة سؤال عن مبلغ سابق → mode = \"query\" و query_mode = true و should_save = false.\n"
-        "- إذا كانت الرسالة عن بيع أو شراء حيوانات فحدد أيضاً قيم livestock_*.\n"
-        "- إذا لم تكن الرسالة متعلقة بالمال → mode = \"other\" و should_save = false و query_mode = false و livestock_change_mode = false.\n"
+        "process/type/amount كما في الشرح السابق.\n"
         "إذا لم تكن الرسالة عملية مالية يمكن حفظها، اجعل should_save = false دائماً."
     )
 
@@ -180,12 +143,7 @@ def analyze_with_ai(text):
     except Exception as e:
         raise RuntimeError(f"OpenAI API call failed: {e}")
 
-    raw = None
-    try:
-        raw = getattr(resp, "output_text", None)
-    except Exception:
-        raw = None
-
+    raw = getattr(resp, "output_text", None)
     if not raw:
         try:
             out = getattr(resp, "output", None)
@@ -244,8 +202,7 @@ def analyze_livestock(text):
         "  ]\n"
         "}\n\n"
         "إذا كان النص مثل: \"سجل العدد الكلي للمواشي كالتالي: عدد (60) حري ...\" فهذا يعني صورة إجمالية للحظيرة، واجعل movement = \"إجمالي\" لكل بند.\n"
-        "إذا لم يذكر تاريخ صريح استخدم تاريخ اليوم بالتنسيق YYYY-MM-DD.\n"
-        "count يجب أن يكون عدداً صحيحاً موجباً دائماً."
+        "إذا لم يذكر تاريخ صريح استخدم تاريخ اليوم.\n"
     )
 
     user_block = json.dumps({"message": text}, ensure_ascii=False)
@@ -260,12 +217,7 @@ def analyze_livestock(text):
     except Exception as e:
         raise RuntimeError(f"OpenAI API call failed (livestock): {e}")
 
-    raw = None
-    try:
-        raw = getattr(resp, "output_text", None)
-    except Exception:
-        raw = None
-
+    raw = getattr(resp, "output_text", None)
     if not raw:
         try:
             out = getattr(resp, "output", None)
@@ -306,6 +258,7 @@ def analyze_livestock(text):
     return data
 
 
+# ================== BALANCE HELPERS ==================
 def compute_previous_balance(sheet):
     try:
         rows = sheet.get_all_values()
@@ -357,6 +310,7 @@ def choose_date_from_ai(ai_date, original_text: str) -> str:
     return today.isoformat()
 
 
+# ================== LIVESTOCK SUMMARY ==================
 def update_livestock_summary(animal_type: str, breed: str, count: int, movement: str):
     import re as _re
 
@@ -491,6 +445,7 @@ def reply_livestock_status(update):
     update.message.reply_text(msg)
 
 
+# ================== COMMANDS ==================
 def start_command(update, context):
     if not authorized(update):
         update.message.reply_text("❌ غير مصرح لك باستخدام هذا البوت.")
@@ -562,7 +517,7 @@ def confirm_command(update, context):
     text = pending["text"]
     kind = pending.get("kind", "expense")
 
-    # ✅ وضع المواشي: يعدّل إجمالي المواشي فقط، بدون كتابة في تبويب "المواشي"
+    # ========= تأكيد عمليات المواشي =========
     if kind == "livestock":
         ai_data = pending.get("ai")
         del PENDING_MESSAGES[user_id]
@@ -577,12 +532,65 @@ def confirm_command(update, context):
             return
 
         date_str = choose_date_from_ai(ai_data.get("date"), text)
-        saved = 0
 
+        # هل كل الحركات من نوع "إجمالي" ؟ إذا نعم → نعيد بناء التبويب بالكامل
+        all_total = all(
+            (e.get("movement") or "إجمالي") == "إجمالي" for e in entries
+        )
+
+        if all_total:
+            try:
+                sheet = get_livestock_summary_sheet()
+                # مسح كل شيء
+                sheet.clear()
+                # إعادة العنوان
+                sheet.append_row(
+                    ["نوع الحيوان", "السلالة", "العدد الحالي"],
+                    value_input_option="USER_ENTERED",
+                )
+
+                saved = 0
+                for e in entries:
+                    animal_type = e.get("animal_type") or ""
+                    breed = e.get("breed") or ""
+                    count = e.get("count")
+                    if count is None:
+                        continue
+                    try:
+                        count_val = int(float(count))
+                        if count_val <= 0:
+                            continue
+                    except Exception:
+                        continue
+
+                    sheet.append_row(
+                        [animal_type, breed, count_val],
+                        value_input_option="USER_ENTERED",
+                    )
+                    saved += 1
+
+                if saved == 0:
+                    update.message.reply_text(
+                        "❌ لم يتم حفظ أي بند، تأكد من صياغة رسالة الحصر."
+                    )
+                else:
+                    update.message.reply_text(
+                        f"✅ تم تحديث أعداد المواشي في تبويب \"المواشي - إجمالي\" ({saved} بنود).\n"
+                        f"التاريخ (للمعلومية فقط): {date_str}"
+                    )
+            except Exception as e:
+                print("ERROR rebuilding livestock summary:", repr(e))
+                update.message.reply_text(
+                    f"❌ حدث خطأ أثناء تحديث تبويب \"المواشي - إجمالي\":\n{e}"
+                )
+            return
+
+        # لو الرسالة فيها حركات غير إجمالي (مواليد، بيع…)
+        saved = 0
         for e in entries:
             animal_type = e.get("animal_type") or ""
             breed = e.get("breed") or ""
-            movement = e.get("movement") or "إجمالي"
+            movement = e.get("movement") or "إضافة"
             count = e.get("count")
             if count is None:
                 continue
@@ -603,12 +611,12 @@ def confirm_command(update, context):
             update.message.reply_text("❌ لم يتم تعديل أي عدد في المواشي، تحقق من الرسالة.")
         else:
             update.message.reply_text(
-                f"✅ تم تحديث أعداد المواشي في تبويب \"المواشي - إجمالي\" ({saved} بنود).\n"
+                f"✅ تم تعديل أعداد المواشي في تبويب \"المواشي - إجمالي\" ({saved} بنود).\n"
                 f"التاريخ (للمعلومية فقط): {date_str}"
             )
         return
 
-    # باقي الكود كما هو لعمليات المصاريف …
+    # ========= بقية الحالات: عمليات مالية =========
     ai_data = pending.get("ai")
     if not ai_data:
         try:
@@ -674,7 +682,6 @@ def confirm_command(update, context):
         return
 
     livestock_msg = ""
-    # ✅ التعديل التلقائي لأعداد المواشي من عملية مالية، بدون تخزين سجل حركة
     if ai_data.get("livestock_change_mode"):
         delta = ai_data.get("livestock_delta")
         animal_type = ai_data.get("livestock_animal_type") or ""
@@ -960,6 +967,7 @@ def livestock_status_command(update, context):
         reply_livestock_status(update)
 
 
+# ================== MESSAGE HANDLER ==================
 def handle_message(update, context):
     user_id = update.message.from_user.id
     if not authorized(update):
@@ -976,7 +984,7 @@ def handle_message(update, context):
         reply_livestock_status(update)
         return
 
-    if "سجل" in text and re.search(r"عدد\s*\(\d+\)", text):
+    if "سجل" in normalized and re.search(r"عدد\s*\(\d+\)", normalized):
         try:
             ai_livestock = analyze_livestock(text)
         except Exception as e:
@@ -1063,6 +1071,7 @@ def handle_message(update, context):
     )
 
 
+# ================== HEALTH SERVER (لـ Render) ==================
 def start_health_server():
     port = int(os.environ.get("PORT", "10000"))
 
@@ -1081,6 +1090,7 @@ def start_health_server():
         httpd.serve_forever()
 
 
+# ================== MAIN ==================
 def main():
     server_thread = threading.Thread(target=start_health_server, daemon=True)
     server_thread.start()
