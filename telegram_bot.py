@@ -357,9 +357,17 @@ def choose_date_from_ai(ai_date, original_text: str) -> str:
 
 
 def update_livestock_summary(animal_type: str, breed: str, count: int, movement: str):
-    animal_type = animal_type or ""
-    breed = breed or ""
-    movement = movement or ""
+    def norm(s: str) -> str:
+        if not isinstance(s, str):
+            return ""
+        s = s.strip()
+        s = s.replace("أ", "ا").replace("إ", "ا").replace("آ", "ا")
+        return s
+
+    animal_type = norm(animal_type)
+    breed = norm(breed)
+    movement = (movement or "").strip()
+
     try:
         sheet = get_livestock_summary_sheet()
         rows = sheet.get_all_values()
@@ -371,8 +379,8 @@ def update_livestock_summary(animal_type: str, breed: str, count: int, movement:
     current_value = 0
 
     for idx, row in enumerate(rows[1:], start=2):
-        a = (row[0] or "").strip()
-        b = (row[1] or "").strip()
+        a = norm(row[0] or "")
+        b = norm(row[1] or "")
         if a == animal_type and b == breed:
             current_row_index = idx
             try:
@@ -381,13 +389,14 @@ def update_livestock_summary(animal_type: str, breed: str, count: int, movement:
                 current_value = 0
             break
 
-    movement = movement.strip()
     if movement == "إجمالي":
         new_value = count
     else:
         minus_moves = {"بيع", "نقص", "نفوق"}
         sign = -1 if movement in minus_moves else 1
         new_value = current_value + sign * count
+        if new_value < 0:
+            new_value = 0
 
     if current_row_index is None:
         try:
@@ -455,12 +464,14 @@ def start_command(update, context):
         return
     update.message.reply_text(
         "👋 أهلاً، هذا بوت المحاسبة للمزرعة.\n"
-        "• اكتب عمليات شراء/بيع بالعربي وسيتم حفظها في Azba Expenses.\n"
-        "• تقدر تسجل عدد المواشي برسالة مثل:\n"
+        "• العمليات المالية تُحفظ في شيت Azba Expenses.\n"
+        "• تبويب \"المواشي\" = سجل حركات المواشي.\n"
+        "• تبويب \"المواشي - إجمالي\" = العدد الحالي لكل نوع/سلالة.\n"
+        "• تقدر تسجل حصر كامل برسالة مثل:\n"
         "  سجل العدد الكلي للمواشي كالتالي: عدد (60) حري ...\n"
-        "  ➜ تُحفظ في تبويب \"المواشي\" (سجل) ويتم تحديث \"المواشي - إجمالي\" تلقائياً.\n"
-        "• شراء/بيع/مواليد مواشي يعدّل الأعداد في \"المواشي - إجمالي\".\n"
-        "• لعرض الأعداد الحالية استخدم /livestock أو اكتب: اعرض المواشي المسجلة.\n"
+        "  وهذا يضبط الأعداد في \"المواشي - إجمالي\".\n"
+        "• أي بيع/شراء/مواليد للمواشي يعدّل الأعداد تلقائياً.\n"
+        "• لعرض الأعداد الحالية: /livestock أو اكتب: اعرض المواشي المسجلة.\n"
         "افتراضياً يسجل التاريخ على اليوم، وإذا ذكرت تاريخ معيّن يحفظ على هذاك التاريخ."
     )
 
@@ -484,12 +495,11 @@ def help_command(update, context):
         "مثال عملية مالية:\n"
         "• شريت علف ب 500\n"
         "• تم بيع غنم اضاحي 2 ب 1500\n\n"
-        "تسجيل عدد المواشي (إجمالي أولي أو تحديث كامل):\n"
+        "تسجيل عدد المواشي (حصر كامل):\n"
         "سجل العدد الكلي للمواشي كالتالي:\n"
         "عدد (60) حري\n"
         "عدد (8) صلالي\n"
         "عدد (7) أبقار\n"
-        "هذه الحركة تضبط الأعداد في \"المواشي - إجمالي\".\n"
     )
     update.message.reply_text(text)
 
