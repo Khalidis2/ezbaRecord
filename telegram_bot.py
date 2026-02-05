@@ -25,15 +25,17 @@ if not all([BOT_TOKEN, OPENAI_API_KEY, GOOGLE_SERVICE_ACCOUNT_JSON, SHEET_ID]):
 
 openai_client = OpenAI(api_key=OPENAI_API_KEY)
 
-ALLOWED_USERS = {47329648}
+ALLOWED_USERS = {47329648, 6894180427}
+
 USER_NAMES = {
-    47329648: "أنت",
+    47329648: "خالد",
+    6894180427: "حمد",
 }
 
 PENDING_MESSAGES = {}
 
 
-def get_sheet():
+def get_expense_sheet():
     info = json.loads(GOOGLE_SERVICE_ACCOUNT_JSON)
     scopes = [
         "https://www.googleapis.com/auth/spreadsheets",
@@ -44,7 +46,7 @@ def get_sheet():
     return client_gs.open_by_key(SHEET_ID).sheet1
 
 
-def get_livestock_sheet():
+def get_livestock_log_sheet():
     info = json.loads(GOOGLE_SERVICE_ACCOUNT_JSON)
     scopes = [
         "https://www.googleapis.com/auth/spreadsheets",
@@ -59,6 +61,26 @@ def get_livestock_sheet():
         ws = sh.add_worksheet(title="المواشي", rows=1000, cols=6)
         ws.append_row(
             ["التاريخ", "نوع الحيوان", "السلالة", "العدد", "نوع الحركة", "ملاحظة"],
+            value_input_option="USER_ENTERED",
+        )
+    return ws
+
+
+def get_livestock_summary_sheet():
+    info = json.loads(GOOGLE_SERVICE_ACCOUNT_JSON)
+    scopes = [
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/drive",
+    ]
+    creds = Credentials.from_service_account_info(info, scopes=scopes)
+    client_gs = gspread.authorize(creds)
+    sh = client_gs.open_by_key(SHEET_ID)
+    try:
+        ws = sh.worksheet("المواشي - إجمالي")
+    except gspread.WorksheetNotFound:
+        ws = sh.add_worksheet(title="المواشي - إجمالي", rows=1000, cols=3)
+        ws.append_row(
+            ["نوع الحيوان", "السلالة", "العدد الحالي"],
             value_input_option="USER_ENTERED",
         )
     return ws
@@ -334,29 +356,71 @@ def choose_date_from_ai(ai_date, original_text: str) -> str:
     return today.isoformat()
 
 
+def update_livestock_summary(animal_type: str, breed: str, count: int, movement: str):
+    animal_type = animal_type or ""
+    breed = breed or ""
+    movement = movement or ""
+    try:
+        sheet = get_livestock_summary_sheet()
+        rows = sheet.get_all_values()
+    except Exception as e:
+        print("ERROR accessing livestock summary sheet:", repr(e))
+        return
+
+    current_row_index = None
+    current_value = 0
+
+    for idx, row in enumerate(rows[1:], start=2):
+        a = (row[0] or "").strip()
+        b = (row[1] or "").strip()
+        if a == animal_type and b == breed:
+            current_row_index = idx
+            try:
+                current_value = int(float((row[2] or "0").strip()))
+            except Exception:
+                current_value = 0
+            break
+
+    movement = movement.strip()
+    if movement == "إجمالي":
+        new_value = count
+    else:
+        minus_moves = {"بيع", "نقص", "نفوق"}
+        sign = -1 if movement in minus_moves else 1
+        new_value = current_value + sign * count
+
+    if current_row_index is None:
+        try:
+            sheet.append_row(
+                [animal_type, breed, new_value],
+                value_input_option="USER_ENTERED",
+            )
+        except Exception as e:
+            print("ERROR appending summary row:", repr(e))
+    else:
+        try:
+            sheet.update_cell(current_row_index, 3, new_value)
+        except Exception as e:
+            print("ERROR updating summary row:", repr(e))
+
+
 def get_livestock_totals():
-    sheet = get_livestock_sheet()
+    sheet = get_livestock_summary_sheet()
     rows = sheet.get_all_values()
     totals = {}
     for row in rows[1:]:
-        if len(row) < 4:
+        if len(row) < 3:
             continue
-        animal = (row[1] or "").strip()
-        breed = (row[2] or "").strip()
-        count_str = (row[3] or "").strip()
+        animal = (row[0] or "").strip()
+        breed = (row[1] or "").strip()
+        count_str = (row[2] or "").strip()
         if not count_str:
             continue
         try:
-            count = int(float(count_str))
+            cnt = int(float(count_str))
         except Exception:
             continue
-        movement = (row[4] or "").strip() if len(row) > 4 else ""
-        if movement in ("بيع", "نقص", "نفوق"):
-            sign = -1
-        else:
-            sign = 1
-        key = (animal or "-", breed or "-")
-        totals[key] = totals.get(key, 0) + sign * count
+        totals[(animal or "-", breed or "-")] = cnt
     return totals
 
 
@@ -368,7 +432,7 @@ def reply_livestock_status(update):
         return
 
     if not totals:
-        update.message.reply_text("ℹ️ لا توجد أي سجلات مواشي حالياً في تبويب المواشي.")
+        update.message.reply_text("ℹ️ لا توجد أي سجلات مواشي حالياً.")
         return
 
     lines = []
@@ -378,7 +442,7 @@ def reply_livestock_status(update):
         lines.append(f"{animal} | {breed}: {cnt}")
 
     msg = (
-        "🐑 المواشي المسجّلة حالياً (صافي بعد الإضافات والبيع والنقص):\n"
+        "🐑 الأعداد الحالية للمواشي في العزبة (من تبويب \"المواشي - إجمالي\"):\n"
         + "\n".join(lines)
         + f"\n\nالمجموع الكلي لجميع الأنواع: {overall}"
     )
@@ -391,12 +455,13 @@ def start_command(update, context):
         return
     update.message.reply_text(
         "👋 أهلاً، هذا بوت المحاسبة للمزرعة.\n"
-        "اكتب أي عملية شراء أو بيع بالعربي، أو اسأل عن المصاريف والدخل.\n"
-        "تقدر بعد تسجل عدد المواشي برسالة مثل:\n"
-        "سجل العدد الكلي للمواشي كالتالي: عدد (60) حري ...\n"
-        "ولعرض المواشي المسجلة استخدم /livestock أو اكتب: اعرض المواشي المسجلة.\n"
-        "افتراضياً يسجل التاريخ على اليوم، وإذا ذكرت تاريخ معين يحفظ على هذاك التاريخ.\n"
-        "استخدم /help لرؤية كل الأوامر."
+        "• اكتب عمليات شراء/بيع بالعربي وسيتم حفظها في Azba Expenses.\n"
+        "• تقدر تسجل عدد المواشي برسالة مثل:\n"
+        "  سجل العدد الكلي للمواشي كالتالي: عدد (60) حري ...\n"
+        "  ➜ تُحفظ في تبويب \"المواشي\" (سجل) ويتم تحديث \"المواشي - إجمالي\" تلقائياً.\n"
+        "• شراء/بيع/مواليد مواشي يعدّل الأعداد في \"المواشي - إجمالي\".\n"
+        "• لعرض الأعداد الحالية استخدم /livestock أو اكتب: اعرض المواشي المسجلة.\n"
+        "افتراضياً يسجل التاريخ على اليوم، وإذا ذكرت تاريخ معيّن يحفظ على هذاك التاريخ."
     )
 
 
@@ -408,25 +473,23 @@ def help_command(update, context):
     text = (
         "📋 أوامر البوت:\n\n"
         "🆘 /help - عرض قائمة الأوامر.\n"
-        "💰 /balance - عرض الرصيد الحالي.\n"
-        "↩️ /undo - حذف آخر عملية محفوظة.\n"
+        "💰 /balance - عرض الرصيد الحالي من المصاريف/الدخل.\n"
+        "↩️ /undo - حذف آخر عملية مالية محفوظة.\n"
         "📅 /week - ملخص آخر 7 أيام.\n"
         "📆 /month - ملخص هذا الشهر.\n"
         "📊 /status - ملخص اليوم + الأسبوع + الشهر.\n"
-        "🐑 /livestock - عرض عدد المواشي المسجلة حالياً.\n"
+        "🐑 /livestock - عرض عدد المواشي الحالي من تبويب \"المواشي - إجمالي\".\n"
         "✅ /confirm - تأكيد وحفظ آخر رسالة.\n"
         "❌ /cancel - إلغاء آخر رسالة قيد التأكيد.\n\n"
-        "مثال عملية بدون تاريخ (يُسجل على اليوم):\n"
+        "مثال عملية مالية:\n"
         "• شريت علف ب 500\n"
-        "مثال مع تاريخ:\n"
-        "• شريت علف أمس ب 500\n"
-        "• تم بيع غنم اضاحي 2 ب 1500 بتاريخ 5/6\n\n"
-        "تسجيل عدد المواشي:\n"
+        "• تم بيع غنم اضاحي 2 ب 1500\n\n"
+        "تسجيل عدد المواشي (إجمالي أولي أو تحديث كامل):\n"
         "سجل العدد الكلي للمواشي كالتالي:\n"
         "عدد (60) حري\n"
         "عدد (8) صلالي\n"
         "عدد (7) أبقار\n"
-        "ولعرضها لاحقاً: /livestock أو اعرض المواشي المسجلة.\n"
+        "هذه الحركة تضبط الأعداد في \"المواشي - إجمالي\".\n"
     )
     update.message.reply_text(text)
 
@@ -475,7 +538,7 @@ def confirm_command(update, context):
         note = ai_data.get("note") or text
 
         try:
-            sheet = get_livestock_sheet()
+            log_sheet = get_livestock_log_sheet()
         except Exception as e:
             update.message.reply_text(f"❌ خطأ في الوصول إلى شيت المواشي:\n{e}")
             return
@@ -496,10 +559,11 @@ def confirm_command(update, context):
                 continue
 
             try:
-                sheet.append_row(
+                log_sheet.append_row(
                     [date_str, animal_type, breed, count_val, movement, note],
                     value_input_option="USER_ENTERED",
                 )
+                update_livestock_summary(animal_type, breed, count_val, movement)
                 saved += 1
             except Exception as ex:
                 print("ERROR saving livestock row:", repr(ex))
@@ -508,7 +572,7 @@ def confirm_command(update, context):
             update.message.reply_text("❌ لم يتم حفظ أي سجل مواشي، تحقق من الرسالة.")
         else:
             update.message.reply_text(
-                f"✅ تم حفظ سجلات المواشي ({saved} صفوف) في تبويب المواشي.\n"
+                f"✅ تم حفظ سجلات المواشي ({saved} صفوف) في تبويب \"المواشي\" وتحديث \"المواشي - إجمالي\".\n"
                 f"التاريخ: {date_str}"
             )
         return
@@ -558,7 +622,7 @@ def confirm_command(update, context):
     )
 
     try:
-        sheet = get_sheet()
+        sheet = get_expense_sheet()
     except Exception as e:
         update.message.reply_text(f"❌ خطأ في الوصول إلى Google Sheets: {e}")
         return
@@ -594,8 +658,8 @@ def confirm_command(update, context):
             movement = "بيع" if delta_int < 0 and process == "بيع" else "إضافة"
             count_val = abs(delta_int)
             try:
-                lsheet = get_livestock_sheet()
-                lsheet.append_row(
+                log_sheet = get_livestock_log_sheet()
+                log_sheet.append_row(
                     [
                         date_str,
                         animal_type,
@@ -606,6 +670,7 @@ def confirm_command(update, context):
                     ],
                     value_input_option="USER_ENTERED",
                 )
+                update_livestock_summary(animal_type, breed, count_val, movement)
                 sign_animals = "-" if delta_int < 0 else "+"
                 livestock_msg = (
                     f"\n🐑 تم تسجيل حركة مواشي: {animal_type or '-'} | "
@@ -634,7 +699,7 @@ def balance_command(update, context):
         return
 
     try:
-        sheet = get_sheet()
+        sheet = get_expense_sheet()
         balance = compute_previous_balance(sheet)
     except Exception as e:
         update.message.reply_text(f"❌ خطأ في قراءة الرصيد من Google Sheets:\n{e}")
@@ -650,7 +715,7 @@ def undo_command(update, context):
         return
 
     try:
-        sheet = get_sheet()
+        sheet = get_expense_sheet()
         rows = sheet.get_all_values()
     except Exception as e:
         update.message.reply_text(f"❌ خطأ في الوصول إلى Google Sheets:\n{e}")
@@ -684,7 +749,7 @@ def undo_command(update, context):
 
 
 def load_expenses():
-    sheet = get_sheet()
+    sheet = get_expense_sheet()
     rows = sheet.get_all_values()
     expenses = []
     for row in rows[1:]:
@@ -928,7 +993,7 @@ def handle_message(update, context):
         update.message.reply_text(
             "📨 تأكيد تسجيل المواشي\n"
             f"رسالتك:\n\"{text}\"\n\n"
-            "سيتم حفظ السجلات التالية في تبويب المواشي:\n"
+            "سيتم حفظ السجلات التالية في تبويب \"المواشي\" وتحديث \"المواشي - إجمالي\":\n"
             + "\n".join(lines)
             + "\n\nإذا موافق، أرسل /confirm\n"
             "إذا لا، أرسل /cancel"
