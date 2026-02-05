@@ -707,8 +707,8 @@ def confirm_command(update, context):
                 update_livestock_summary(animal_type, breed, count_val, movement)
                 sign_animals = "-" if delta_int < 0 else "+"
                 livestock_msg = (
-                    f"\n🐑 تم تعديل عدد المواشي: {animal_type or '-'} | "
-                    f"{breed or '-'} | {sign_animals}{count_val}"
+                    f"\n🐑 تم تعديل عدد المواشي في تبويب \"المواشي - إجمالي\": "
+                    f"{animal_type or '-'} | {breed or '-'} | {sign_animals}{count_val}"
                 )
                 log_livestock_meta(next_row_index, animal_type, breed, delta_int)
             except Exception as e:
@@ -729,13 +729,18 @@ def confirm_command(update, context):
         return
 
     sign_str = "+" if signed_amount >= 0 else "-"
-    update.message.reply_text(
-        "✅ تم الحفظ في Google Sheets\n"
-        f"{date_str} | {process} | {type_} | {item or '-'} | {amount}\n"
-        f"التأثير على الرصيد: {sign_str}{abs(signed_amount)}\n"
-        f"الرصيد الآن: {new_balance}"
+    msg = (
+        "✅ تم حفظ العملية في ورقة *Azba Expenses*:\n\n"
+        f"🗓 التاريخ: {date_str}\n"
+        f"🔁 نوع العملية: {process}\n"
+        f"🏷 التصنيف: {type_}\n"
+        f"📝 البند: {item or '-'}\n"
+        f"💰 المبلغ: {amount}\n"
+        f"👤 الشخص: {person_name}\n"
+        f"📊 الرصيد بعد العملية: {new_balance} (التغيير: {sign_str}{abs(signed_amount)})"
         f"{livestock_msg}"
     )
+    update.message.reply_text(msg)
 
 
 def balance_command(update, context):
@@ -1076,6 +1081,7 @@ def handle_message(update, context):
         )
         return
 
+    # -------- تحليل مالي --------
     try:
         ai_data = analyze_with_ai(text)
     except Exception as e:
@@ -1095,18 +1101,90 @@ def handle_message(update, context):
         return
 
     if ai_data.get("should_save", False):
+        # معاينة واقعية لما سيتم كتابته في الشيت
+        date_str = choose_date_from_ai(ai_data.get("date"), text)
+        process = ai_data.get("process") or "أخرى"
+        type_ = ai_data.get("type") or "اخرى"
+        item = ai_data.get("item") or ""
+        amount = ai_data.get("amount")
+
+        # محاولة استخراج المبلغ مثل confirm_command
+        if amount is None:
+            m = re.search(r"(\d+(?:[.,]\d+)?)", text)
+            if m:
+                amount = float(m.group(1).replace(",", "."))
+        try:
+            if amount is not None:
+                amount = float(amount)
+                if amount < 0:
+                    amount = abs(amount)
+        except Exception:
+            amount = None
+
+        person_name = USER_NAMES.get(user_id, update.message.from_user.first_name or "مستخدم")
+
+        # حساب الرصيد المتوقع
+        try:
+            sheet = get_expense_sheet()
+            prev_balance = compute_previous_balance(sheet)
+        except Exception:
+            prev_balance = None
+
+        balance_preview = "سيتم حسابه عند الحفظ"
+        if amount is not None and prev_balance is not None:
+            signed_amount = amount if process == "بيع" else -amount
+            new_balance = round(prev_balance + signed_amount, 2)
+            sign_str = "+" if signed_amount >= 0 else "-"
+            balance_preview = (
+                f"{prev_balance} → {new_balance} (التغيير: {sign_str}{abs(signed_amount)})"
+            )
+
+        # معاينة تعديل المواشي (إن وجد)
+        livestock_preview = ""
+        if ai_data.get("livestock_change_mode"):
+            delta = ai_data.get("livestock_delta")
+            animal_type = ai_data.get("livestock_animal_type") or ""
+            breed = ai_data.get("livestock_breed") or ""
+            try:
+                if delta is not None:
+                    delta_int = int(float(delta))
+                else:
+                    delta_int = 0
+            except Exception:
+                delta_int = 0
+
+            if delta_int != 0:
+                sign_animals = "-" if delta_int < 0 else "+"
+                livestock_preview = (
+                    f"\n🐑 تأثير المواشي (متوقع): {animal_type or '-'} | "
+                    f"{breed or '-'} | {sign_animals}{abs(delta_int)}"
+                )
+
+        # حفظ الـ ai_data للـ /confirm
         PENDING_MESSAGES[user_id] = {
             "text": text,
             "ai": ai_data,
             "kind": "expense",
         }
-        update.message.reply_text(
+
+        amount_txt = str(amount) if amount is not None else "غير معروف (لم أستطع قراءته)"
+
+        preview_msg = (
             "📨 تأكيد العملية\n"
             f"رسالتك:\n\"{text}\"\n\n"
-            "هل أنت متأكد أنك تريد حفظ هذه العملية في Google Sheets؟\n"
-            "إذا نعم، أرسل الأمر: /confirm\n"
-            "إذا لا، أرسل: /cancel"
+            "سيتم تسجيل هذه العملية في ورقة *Azba Expenses* بالشكل التالي (تقريبي):\n\n"
+            f"🗓 التاريخ: {date_str}\n"
+            f"🔁 نوع العملية: {process}\n"
+            f"🏷 التصنيف: {type_}\n"
+            f"📝 البند: {item or '-'}\n"
+            f"💰 المبلغ: {amount_txt}\n"
+            f"👤 الشخص: {person_name}\n"
+            f"📊 الرصيد المتوقع بعد العملية: {balance_preview}"
+            f"{livestock_preview}\n\n"
+            "إذا موافق، أرسل /confirm\n"
+            "إذا لا، أرسل /cancel"
         )
+        update.message.reply_text(preview_msg)
         return
 
     update.message.reply_text(
