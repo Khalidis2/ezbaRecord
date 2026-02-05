@@ -1,486 +1,555 @@
-# telegram_bot.py
+# file: telegram_bot.py
 import os
-import logging
-import json
 import re
-from datetime import datetime, date, timedelta
-
-from flask import Flask, request
-from telegram import Update
-from telegram.ext import (
-    Updater,
-    CommandHandler,
-    MessageHandler,
-    Filters,
-    CallbackContext,
-)
+import json
+from datetime import datetime, timedelta
 
 import gspread
 from google.oauth2.service_account import Credentials
-import openai
+from telegram.ext import Updater, MessageHandler, Filters, CommandHandler
+from openai import OpenAI
 
-# ================== CONFIG ==================
+# ================== ENV ==================
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+GOOGLE_SERVICE_ACCOUNT_JSON = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
+SHEET_ID = os.environ.get("SHEET_ID")
 
-BOT_TOKEN = os.environ["BOT_TOKEN"]
-BASE_URL = os.environ["BASE_URL"]           # e.g. "https://ezbarecord.onrender.com"
-PORT = int(os.environ.get("PORT", "8000"))
+if not all([BOT_TOKEN, OPENAI_API_KEY, GOOGLE_SERVICE_ACCOUNT_JSON, SHEET_ID]):
+    raise RuntimeError(
+        "Missing environment variables: BOT_TOKEN / OPENAI_API_KEY / "
+        "GOOGLE_SERVICE_ACCOUNT_JSON / SHEET_ID"
+    )
 
-OPENAI_API_KEY = os.environ["OPENAI_API_KEY"]
+# ================== CLIENTS ==============
+openai_client = OpenAI(api_key=OPENAI_API_KEY)
 
-SPREADSHEET_ID = os.environ.get("SPREADSHEET_ID", "")
-SHEET_NAME = os.environ.get("SHEET_NAME", "records")
-GOOGLE_SERVICE_ACCOUNT_JSON = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "")
-
-ALLOWED_USERS = {47329648, 6894180427}
+# حط IDs اللي تسمح لهم يستخدمون البوت هنا
+ALLOWED_USERS = {47329648}
 USER_NAMES = {
-    47329648: "Khaled",
-    6894180427: "Hamad",
+    47329648: "أنت",
 }
 
-openai.api_key = OPENAI_API_KEY
+# نخزن آخر رسالة تنتظر تأكيد لكل مستخدم
+PENDING_MESSAGES = {}
 
-# ================== LOGGING ==================
 
-logging.basicConfig(level=logging.INFO)
-log = logging.getLogger(__name__)
-
-# ================== GOOGLE SHEETS ==================
-
-def get_gsheet():
-    if not SPREADSHEET_ID or not GOOGLE_SERVICE_ACCOUNT_JSON:
-        raise RuntimeError("Missing SPREADSHEET_ID or GOOGLE_SERVICE_ACCOUNT_JSON env vars")
+def get_sheet():
     info = json.loads(GOOGLE_SERVICE_ACCOUNT_JSON)
-    scopes = ["https://www.googleapis.com/auth/spreadsheets"]
-    creds = Credentials.from_service_account_info(info, scopes=scopes)
-    client = gspread.authorize(creds)
-    return client.open_by_key(SPREADSHEET_ID).worksheet(SHEET_NAME)
-
-# expected header row in sheet:
-# date | type | category | item | amount | currency | user
-
-# ================== TELEGRAM SETUP ==================
-
-updater = Updater(BOT_TOKEN, use_context=True)
-dispatcher = updater.dispatcher
-
-def is_allowed(update: Update) -> bool:
-    u = update.effective_user
-    return bool(u and u.id in ALLOWED_USERS)
-
-# ================== OPENAI HELPER ==================
-
-SYSTEM_PROMPT = """
-You are an AI assistant for a farm bookkeeping bot called "ezba record".
-User messages are mostly in Gulf Arabic, sometimes English or Urdu.
-
-Your job:
-1) Understand what the user wants.
-2) Decide ONE action:
-   - "add_transaction"    → record expense or income
-   - "get_report"         → show totals from Google Sheets
-   - "help"               → explain how to use the bot
-   - "chat"               → small talk, explanation or general answer
-3) Return ONLY a single JSON object. No extra text, no markdown.
-
-JSON SCHEMA:
-
-{
-  "action": "add_transaction" | "get_report" | "help" | "chat",
-  "tx_type": "expense" | "income" | null,
-  "category": "<short english label or null>",
-  "item": "<short description in user's language or null>",
-  "amount": float or null,
-  "currency": "AED",
-  "note": "<optional note or empty string>",
-  "time_range": "today" | "yesterday" | "this_week" | "this_month" | "last_month" | "this_year" | "all_time" | null,
-  "categories": [ "<category1>", "<category2>", ... ],
-  "report_type": "summary" | "by_category" | null,
-  "reply_language": "ar",
-  "free_answer": "<string, used only if action='chat' or 'help'>"
-}
-
-INTERPRETATION RULES:
-
-- If message sounds like recording money:
-  - words like: "مصروف", "صرف", "فاتورة", "دفعت", "اشتريت", "expense", "cost" → tx_type="expense"
-  - words like: "بعت", "مبيعات", "دخل", "income", "sale" → tx_type="income"
-  - Extract the main money number (amount). If no number → amount=null.
-  - Choose category in ENGLISH:
-    - "electricity"  for كهرب
-    - "water"        for ماي / ماء
-    - "feed"         for علف / علايف
-    - "medicine"     for دواء / أدوية / بيطري
-    - "labor"        for عامل / رواتب
-    - "eggs"         for بيض
-    - "sheep"        for غنم / خروف
-    - "chicken"      for دجاج
-    - "other"        otherwise
-  - item: short description including what was bought/sold.
-  - Use "AED" for currency.
-  - In this case: action="add_transaction".
-
-- If message asks questions like:
-  - "كم صرفت اليوم؟"
-  - "اعرض مصاريف العلف والماء هذا الشهر"
-  - "كم دخلت من بيع الغنم هالسنة؟"
-  - "show expenses for water this month"
-  Then it's a report:
-   action="get_report"
-
-  time_range detection:
-    اليوم / today          → "today"
-    امس / أمس / yesterday  → "yesterday"
-    هالاسبوع / هذا الاسبوع / this week  → "this_week"
-    هالشهر / هذا الشهر / this month      → "this_month"
-    الشهر اللي طاف / last month          → "last_month"
-    هالسنة / this year                   → "this_year"
-    else                                  → "all_time"
-
-  type vs both:
-    if mentions only expense words → report only expenses
-    if mentions only income / sale words → report only income
-    if talks about overall status or both expenses and income → we will handle both in code,
-    you just set report_type depending on if user wants breakdown or just total.
-
-  categories:
-    - List the english category labels user requested:
-      - "feed", "water", "electricity", "medicine", "labor", "eggs", "sheep", "chicken", "other"
-    - If user said "all", leave categories=[].
-
-  report_type:
-    - if user wants total only, set "summary"
-    - if user wants breakdown by category, set "by_category"
-
-- If user asks "how to use" or "/help" → action="help" and fill free_answer with short Arabic instructions.
-
-- If it's small talk / general question not about money → action="chat" and put the Arabic answer in "free_answer".
-
-IMPORTANT:
-- ALWAYS return valid JSON only. No backticks, no markdown.
-- If you are unsure, choose the closest reasonable interpretation.
-"""
-
-def call_openai_for_intent(user_text: str) -> dict:
-    try:
-        resp = openai.ChatCompletion.create(
-            model="gpt-4o-mini",
-            temperature=0,
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": user_text},
-            ],
-        )
-        content = resp.choices[0].message["content"]
-    except Exception as e:
-        log.exception("OpenAI error: %s", e)
-        return {
-            "action": "chat",
-            "free_answer": "صار خطأ في خدمة الذكاء الاصطناعي، جرّب بعد شوي.",
-        }
-
-    try:
-        start = content.find("{")
-        end = content.rfind("}")
-        if start == -1 or end == -1:
-            raise ValueError("No JSON object found")
-        json_str = content[start : end + 1]
-        data = json.loads(json_str)
-        return data
-    except Exception as e:
-        log.exception("Failed to parse OpenAI JSON: %s\ncontent=%r", e, content)
-        return {
-            "action": "chat",
-            "free_answer": "ما قدرت أفهم الرد من الذكاء الاصطناعي، جرّب تعيد صياغة الرسالة.",
-        }
-
-# ================== SHEET HELPERS ==================
-
-def append_transaction_to_sheet(
-    tx_type: str,
-    category: str,
-    item: str,
-    amount: float,
-    user_name: str,
-):
-    sheet = get_gsheet()
-    today_str = datetime.utcnow().strftime("%Y-%m-%d")
-    row = [
-        today_str,
-        tx_type,
-        category or "other",
-        item or "",
-        amount,
-        "AED",
-        user_name,
+    scopes = [
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/drive",
     ]
-    sheet.append_row(row)
+    creds = Credentials.from_service_account_info(info, scopes=scopes)
+    client_gs = gspread.authorize(creds)
+    return client_gs.open_by_key(SHEET_ID).sheet1
 
-def parse_time_range(tr: str):
-    today = date.today()
-    if tr == "today":
-        return today, today
-    if tr == "yesterday":
-        d = today - timedelta(days=1)
-        return d, d
-    if tr == "this_week":
-        start = today - timedelta(days=today.weekday())
-        return start, today
-    if tr == "this_month":
-        start = today.replace(day=1)
-        return start, today
-    if tr == "last_month":
-        first_this = today.replace(day=1)
-        last_month_end = first_this - timedelta(days=1)
-        start = last_month_end.replace(day=1)
-        return start, last_month_end
-    if tr == "this_year":
-        start = date(today.year, 1, 1)
-        return start, today
-    return None, None  # all_time
 
-def read_report_from_sheet(
-    time_range: str,
-    categories: list,
-    want_type: str,  # "expense", "income", "both"
-):
-    sheet = get_gsheet()
-    rows = sheet.get_all_values()
-    if not rows:
-        return {}
+def authorized(update):
+    return update.message.from_user.id in ALLOWED_USERS
 
-    headers = rows[0]
-    data_rows = rows[1:]
 
-    idx_date = headers.index("date") if "date" in headers else 0
-    idx_type = headers.index("type") if "type" in headers else 1
-    idx_cat = headers.index("category") if "category" in headers else 2
-    idx_amount = headers.index("amount") if "amount" in headers else 4
+# ================== AI HELPERS ==================
+def extract_json_from_raw(raw_text):
+    if not isinstance(raw_text, str):
+        raw_text = str(raw_text)
 
-    start, end = parse_time_range(time_range)
-    totals = {}
+    try:
+        return json.loads(raw_text)
+    except Exception:
+        pass
 
-    for r in data_rows:
-        if len(r) <= max(idx_date, idx_type, idx_cat, idx_amount):
-            continue
-        d_str = r[idx_date]
-        t_type = r[idx_type]
-        cat = r[idx_cat] or "other"
+    start = raw_text.find("{")
+    if start == -1:
+        raise ValueError("no JSON object found in response")
+
+    for end in range(len(raw_text) - 1, start, -1):
+        candidate = raw_text[start : end + 1]
         try:
-            amt = float(r[idx_amount])
+            return json.loads(candidate)
         except Exception:
             continue
 
-        if start and end:
-            try:
-                d_val = datetime.strptime(d_str, "%Y-%m-%d").date()
-            except Exception:
-                continue
-            if d_val < start or d_val > end:
-                continue
+    raise ValueError("no parseable JSON found")
 
-        if want_type == "expense" and t_type != "expense":
-            continue
-        if want_type == "income" and t_type != "income":
-            continue
 
-        if cat not in totals:
-            totals[cat] = {"expense": 0.0, "income": 0.0}
-        totals[cat][t_type] += amt
+def analyze_with_ai(text):
+    today = datetime.now().date().isoformat()
+    yesterday = (datetime.now().date() - timedelta(days=1)).isoformat()
 
-    if categories:
-        for c in categories:
-            if c not in totals:
-                totals[c] = {"expense": 0.0, "income": 0.0}
-
-    return totals
-
-def summarize_report_text(
-    user_question: str,
-    time_range: str,
-    totals: dict,
-    want_type: str,
-) -> str:
-    if not totals:
-        return "ما لقيت أي بيانات، الكل صفر."
-
-    lines = []
-    total_exp = 0.0
-    total_inc = 0.0
-
-    for cat, vals in totals.items():
-        e = vals.get("expense", 0.0)
-        i = vals.get("income", 0.0)
-        total_exp += e
-        total_inc += i
-
-        if want_type == "expense":
-            lines.append(f"{cat}: مصاريف {e:.2f}")
-        elif want_type == "income":
-            lines.append(f"{cat}: دخل {i:.2f}")
-        else:
-            lines.append(f"{cat}: مصاريف {e:.2f} / دخل {i:.2f}")
-
-    prefix = ""
-    if time_range == "today":
-        prefix = "تقرير اليوم:\n"
-    elif time_range == "yesterday":
-        prefix = "تقرير أمس:\n"
-    elif time_range == "this_month":
-        prefix = "تقرير هذا الشهر:\n"
-    elif time_range == "last_month":
-        prefix = "تقرير الشهر اللي طاف:\n"
-    elif time_range == "this_year":
-        prefix = "تقرير هذه السنة:\n"
-
-    extra = ""
-    if want_type == "expense":
-        extra = f"\nالمجموع الكلي للمصاريف: {total_exp:.2f} درهم."
-    elif want_type == "income":
-        extra = f"\nالمجموع الكلي للدخل: {total_inc:.2f} درهم."
-    else:
-        net = total_inc - total_exp
-        extra = (
-            f"\nإجمالي المصاريف: {total_exp:.2f} درهم.\n"
-            f"إجمالي الدخل: {total_inc:.2f} درهم.\n"
-            f"الصافي: {net:.2f} درهم."
-        )
-
-    return prefix + "\n".join(lines) + extra
-
-# ================== HANDLERS ==================
-
-def start_cmd(update: Update, context: CallbackContext):
-    if not is_allowed(update):
-        return
-    update.message.reply_text(
-        "✅ ezba bot online\n"
-        "اكتب مصروف أو بيع بالعربي، أو اسأل: كم صرفت اليوم، كم دخلت من الغنم هذا الشهر، وهكذا."
+    system_instructions = (
+        "أنت مساعد مالي لمزرعة وغنم. أعد فقط JSON صالح بدون أي تعليق.\n"
+        "استخدم السكيم التالي:\n"
+        "{\n"
+        '  \"should_save\": true|false,\n'
+        '  \"date\": \"YYYY-MM-DD\",\n'
+        '  \"process\": \"شراء\"|\"بيع\"|\"فاتورة\"|\"راتب\"|\"أخرى\",\n'
+        '  \"type\": \"علف\"|\"منتجات\"|\"عمال\"|\"علاج\"|\"كهرباء\"|\"ماء\"|\"اخرى\",\n'
+        '  \"item\": \"وصف قصير للشيء (بيض، حليب، علف، ...)\",\n'
+        '  \"amount\": رقم موجب فقط,\n'
+        '  \"note\": \"نص\"\n'
+        "}\n\n"
+        "التاريخ:\n"
+        f"- إذا قال أمس/امس → استخدم {yesterday}\n"
+        f"- إذا لم يذكر تاريخ أو قال اليوم → استخدم {today}\n"
+        "- إذا ذكر تاريخ صريح فحوّله إلى YYYY-MM-DD.\n\n"
+        "process:\n"
+        "- شراء: عند شراء أي شيء.\n"
+        "- بيع: عند بيع أي شيء.\n"
+        "- فاتورة: كهرباء، ماء، صيانة، فواتير.\n"
+        "- راتب: رواتب العمال.\n"
+        "- أخرى: أي شيء غير ذلك.\n\n"
+        "type:\n"
+        "- علف: علف، شعير، برسيم، تبن، مركزات.\n"
+        "- منتجات: بيض، حليب، لحم، صوف، سمن، أي منتج من المزرعة.\n"
+        "- عمال: رواتب أو مصاريف العمال.\n"
+        "- علاج: دواء، علاج، بيطري.\n"
+        "- كهرباء: كهرب، مولد.\n"
+        "- ماء: ماء، مويه.\n"
+        "- اخرى: غير ذلك.\n\n"
+        "amount:\n"
+        "- دائماً رقم موجب (بدون سالب).\n"
+        "إذا لم تكن الرسالة عملية مالية، اجعل should_save = false."
     )
 
-def help_cmd(update: Update, context: CallbackContext):
-    if not is_allowed(update):
-        return
-    update.message.reply_text(
-        "أمثلة:\n"
-        "- اشتريت علف دجاج 750\n"
-        "- بعت 3 غنم 4200\n"
-        "- كم صرفت على العلف هذا الشهر؟\n"
-        "- اعرض مصاريف الماء والكهرباء هالسنة\n"
-    )
+    user_block = json.dumps({"message": text}, ensure_ascii=False)
+    prompt = system_instructions + "\n\nUserMessage:\n" + user_block
 
-def message_handler(update: Update, context: CallbackContext):
-    if not is_allowed(update):
-        return
-
-    text = update.message.text or ""
-    text = text.strip()
-    if not text:
-        return
-
-    ai = call_openai_for_intent(text)
-    action = ai.get("action")
-
-    user = update.effective_user
-    user_name = USER_NAMES.get(user.id, str(user.id)) if user else "unknown"
-
-    if action == "add_transaction":
-        tx_type = ai.get("tx_type")
-        amount = ai.get("amount")
-        category = ai.get("category") or "other"
-        item = ai.get("item") or text
-
-        if not tx_type or amount is None:
-            update.message.reply_text("ما فهمت المبلغ أو نوع العملية، جرّب تقول:\nاشتريت علف غنم 750")
-            return
-
-        try:
-            append_transaction_to_sheet(tx_type, category, item, float(amount), user_name)
-            kind_ar = "مصروف" if tx_type == "expense" else "دخل"
-            update.message.reply_text(
-                f"تم تسجيل {kind_ar} ({category}) بمبلغ {float(amount):.2f} ✅"
-            )
-        except Exception as e:
-            log.exception("sheet append failed: %s", e)
-            update.message.reply_text("في مشكلة في التخزين في الشيت، جرّب بعد شوي أو بلغ المبرمج.")
-
-    elif action == "get_report":
-        time_range = ai.get("time_range") or "all_time"
-        cats = ai.get("categories") or []
-        report_type = ai.get("report_type") or "summary"
-
-        t_lower = text.lower()
-        if any(k in t_lower for k in ["صرف", "مصروف", "مصاريف", "expense"]):
-            want_type = "expense"
-        elif any(k in t_lower for k in ["دخل", "مبيعات", "بيع", "income"]):
-            want_type = "income"
-        else:
-            want_type = "both"
-
-        try:
-            totals = read_report_from_sheet(time_range, cats, want_type)
-            msg = summarize_report_text(text, time_range, totals, want_type)
-            update.message.reply_text(msg)
-        except Exception as e:
-            log.exception("sheet report failed: %s", e)
-            update.message.reply_text("ما قدرت أطلع التقرير من الشيت، جرّب بعد شوي.")
-
-    elif action == "help":
-        ans = ai.get("free_answer") or ""
-        if not ans:
-            ans = (
-                "تقدر تسجّل مصاريف وبيع، وتسأل عن التقارير.\n"
-                "أمثلة:\n"
-                "اشتريت علف غنم 750\n"
-                "بعت 3 غنم 4200\n"
-                "كم صرفت اليوم؟"
-            )
-        update.message.reply_text(ans)
-
-    elif action == "chat":
-        ans = ai.get("free_answer") or "تمام، إذا تبي تسجّل مصروف أو تشوف تقرير اكتب لي."
-        update.message.reply_text(ans)
-
-    else:
-        update.message.reply_text(
-            "ما فهمت طلبك، حاول تقول:\n"
-            "اشتريت علف غنم 750\n"
-            "أو: كم صرفت على العلف هذا الشهر؟"
-        )
-
-# ================== DISPATCHER ==================
-
-dispatcher.add_handler(CommandHandler("start", start_cmd))
-dispatcher.add_handler(CommandHandler("help", help_cmd))
-dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, message_handler))
-
-# ================== FLASK APP (WEBHOOK SERVER) ==================
-
-app = Flask(__name__)
-
-@app.route("/", methods=["GET"])
-def health():
-    return "OK", 200
-
-@app.route(f"/{BOT_TOKEN}", methods=["POST"])
-def telegram_webhook():
     try:
-        data = request.get_json(force=True)
-        update = Update.de_json(data, updater.bot)
-        dispatcher.process_update(update)
+        resp = openai_client.responses.create(
+            model="gpt-4.1-mini",
+            input=prompt,
+            max_output_tokens=400,
+        )
     except Exception as e:
-        log.exception("Error handling update: %s", e)
-    return "OK", 200
+        raise RuntimeError(f"OpenAI API call failed: {e}")
+
+    raw = None
+    try:
+        raw = getattr(resp, "output_text", None)
+    except Exception:
+        raw = None
+
+    if not raw:
+        try:
+            out = getattr(resp, "output", None)
+            if out and len(out) > 0:
+                first = out[0]
+                content = getattr(first, "content", None)
+                if isinstance(first, dict):
+                    content = first.get("content", content)
+                if isinstance(content, list) and len(content) > 0:
+                    c0 = content[0]
+                    text_field = getattr(c0, "text", None)
+                    if isinstance(c0, dict):
+                        text_field = (
+                            c0.get("text", text_field)
+                            or c0.get("content", text_field)
+                            or c0
+                        )
+                    if hasattr(text_field, "value"):
+                        raw = text_field.value
+                    elif isinstance(text_field, str):
+                        raw = text_field
+                    else:
+                        raw = str(text_field)
+                else:
+                    raw = str(first)
+        except Exception as e:
+            print("DEBUG: structured extraction failed:", repr(e))
+            raw = None
+
+    if not raw:
+        raw = str(resp)
+
+    print("RAW_OPENAI_RESPONSE:", raw)
+
+    data = extract_json_from_raw(raw)
+    if not isinstance(data, dict):
+        raise RuntimeError(f"AI returned non-dict JSON: {type(data)}")
+    return data
+
+
+# ================== BALANCE HELPERS ==================
+def compute_previous_balance(sheet):
+    try:
+        rows = sheet.get_all_values()
+    except Exception:
+        return 0.0
+
+    if len(rows) <= 1:
+        return 0.0
+
+    balance = 0.0
+    for row in rows[1:]:
+        if len(row) < 5:
+            continue
+        proc = row[1].strip() if len(row) > 1 and row[1] else ""
+        amount_str = row[4].strip()
+        if not amount_str:
+            continue
+        try:
+            amt = float(str(amount_str).replace(",", ""))
+        except Exception:
+            continue
+
+        if proc == "بيع":
+            balance += amt
+        else:
+            balance -= amt
+
+    return round(balance, 2)
+
+
+# ================== COMMANDS ==================
+def start_command(update, context):
+    if not authorized(update):
+        update.message.reply_text("❌ غير مصرح لك باستخدام هذا البوت.")
+        return
+    update.message.reply_text(
+        "👋 أهلاً، هذا بوت المحاسبة للمزرعة.\n"
+        "اكتب أي عملية شراء أو بيع بالعربي بشكل طبيعي في هذه المحادثة أو في القروب.\n"
+        "البوت راح يرسل لك رسالة تأكيد، وبعدها تستخدم /confirm للحفظ.\n"
+        "استخدم /help لرؤية كل الأوامر."
+    )
+
+
+def help_command(update, context):
+    if not authorized(update):
+        update.message.reply_text("❌ غير مصرح لك باستخدام هذا البوت.")
+        return
+
+    text = (
+        "📋 أوامر البوت:\n\n"
+        "🆘 /help\n"
+        "عرض قائمة الأوامر هذه.\n\n"
+        "💰 /balance\n"
+        "عرض الرصيد الحالي الحقيقي (الدخل − المصاريف) منذ بداية الدفتر.\n\n"
+        "↩️ /undo\n"
+        "حذف آخر عملية محفوظة (التراجع خطوة واحدة).\n\n"
+        "📅 /week\n"
+        "ملخص آخر 7 أيام:\n"
+        "الدخل (+) ، المصاريف (−) ، والصافي (الدخل − المصاريف).\n\n"
+        "📆 /month\n"
+        "ملخص هذا الشهر:\n"
+        "الدخل (+) ، المصاريف (−) ، والصافي (الدخل − المصاريف).\n\n"
+        "📊 /status\n"
+        "ملخص اليوم + آخر 7 أيام + هذا الشهر:\n"
+        "لكل فترة يعرض:\n"
+        "الدخل (+) ، المصاريف (−) ، والصافي.\n\n"
+        "✅ /confirm\n"
+        "تأكيد وحفظ آخر رسالة كتبتها في Google Sheets بعد تحليلها بالذكاء الاصطناعي.\n\n"
+        "❌ /cancel\n"
+        "إلغاء آخر رسالة قيد التأكيد وعدم حفظها.\n\n"
+        "✍️ طريقة الاستخدام:\n"
+        "1️⃣ اكتب رسالة طبيعية عن عملية بيع أو شراء.\n"
+        "   مثال: بعت 50 بيضة ب 100 درهم.\n"
+        "2️⃣ البوت يرسل لك رسالة تأكيد.\n"
+        "3️⃣ إذا موافق، أرسل /confirm ليتم التحليل والحفظ.\n"
+        "4️⃣ إذا ما تبي تحفظها، أرسل /cancel.\n"
+        "5️⃣ إذا حفظت شيء بالغلط، استخدم /undo لحذف آخر عملية محفوظة.\n"
+    )
+    update.message.reply_text(text)
+
+
+def cancel_command(update, context):
+    user_id = update.message.from_user.id
+    if not authorized(update):
+        update.message.reply_text("❌ غير مصرح لك")
+        return
+
+    if user_id in PENDING_MESSAGES:
+        del PENDING_MESSAGES[user_id]
+        update.message.reply_text("❌ تم إلغاء العملية، لن يتم حفظ شيء.")
+    else:
+        update.message.reply_text("ℹ️ لا توجد عملية قيد التأكيد حالياً.")
+
+
+def confirm_command(update, context):
+    user_id = update.message.from_user.id
+    if not authorized(update):
+        update.message.reply_text("❌ غير مصرح لك")
+        return
+
+    pending = PENDING_MESSAGES.get(user_id)
+    if not pending:
+        update.message.reply_text("ℹ️ لا توجد رسالة قيد التأكيد. أرسل رسالة جديدة أولاً.")
+        return
+
+    text = pending["text"]
+    del PENDING_MESSAGES[user_id]
+
+    try:
+        ai_data = analyze_with_ai(text)
+    except Exception as e:
+        print("ERROR in analyze_with_ai:", repr(e))
+        update.message.reply_text(f"❌ OpenAI error:\n{e}")
+        return
+
+    if not ai_data.get("should_save", False):
+        update.message.reply_text(
+            "ℹ️ بعد التحليل تبيّن أنها ليست عملية مالية — لم يتم حفظ شيء."
+        )
+        return
+
+    date_str = ai_data.get("date") or datetime.now().date().isoformat()
+    process = ai_data.get("process") or "أخرى"
+    type_ = ai_data.get("type") or "اخرى"
+    item = ai_data.get("item") or ""
+    amount = ai_data.get("amount")
+    note = ai_data.get("note") or text
+
+    if amount is None:
+        m = re.search(r"(\d+(?:[.,]\d+)?)", text)
+        if not m:
+            update.message.reply_text("❌ لم أقدر أستخرج مبلغ. اذكر المبلغ كرقم واضح.")
+            return
+        amount = float(m.group(1).replace(",", "."))
+
+    try:
+        amount = float(amount)
+        if amount < 0:
+            amount = abs(amount)
+    except Exception:
+        update.message.reply_text("❌ المبلغ غير واضح، ارسله كرقم فقط.")
+        return
+
+    person_name = USER_NAMES.get(
+        user_id, update.message.from_user.first_name or "مستخدم"
+    )
+
+    try:
+        sheet = get_sheet()
+    except Exception as e:
+        update.message.reply_text(f"❌ خطأ في الوصول إلى Google Sheets: {e}")
+        return
+
+    prev_balance = compute_previous_balance(sheet)
+    signed_amount = amount if process == "بيع" else -amount
+    new_balance = round(prev_balance + signed_amount, 2)
+
+    try:
+        sheet.append_row(
+            [date_str, process, type_, item, amount, note, person_name, new_balance],
+            value_input_option="USER_ENTERED",
+        )
+        sign_str = "+" if signed_amount >= 0 else "-"
+        update.message.reply_text(
+            "✅ تم الحفظ في Google Sheets\n"
+            f"{date_str} | {process} | {type_} | {item or '-'} | {amount}\n"
+            f"التأثير على الرصيد: {sign_str}{abs(signed_amount)}\n"
+            f"الرصيد الآن: {new_balance}"
+        )
+    except Exception as e:
+        print("ERROR saving to sheet:", repr(e))
+        update.message.reply_text(f"❌ خطأ في الحفظ داخل Google Sheets:\n{e}")
+
+
+def balance_command(update, context):
+    user_id = update.message.from_user.id
+    if not authorized(update):
+        update.message.reply_text("❌ غير مصرح لك")
+        return
+
+    try:
+        sheet = get_sheet()
+        balance = compute_previous_balance(sheet)
+    except Exception as e:
+        update.message.reply_text(f"❌ خطأ في قراءة الرصيد من Google Sheets:\n{e}")
+        return
+
+    update.message.reply_text(f"💰 الرصيد الحالي في الدفتر: {balance}")
+
+
+def undo_command(update, context):
+    user_id = update.message.from_user.id
+    if not authorized(update):
+        update.message.reply_text("❌ غير مصرح لك")
+        return
+
+    try:
+        sheet = get_sheet()
+        rows = sheet.get_all_values()
+    except Exception as e:
+        update.message.reply_text(f"❌ خطأ في الوصول إلى Google Sheets:\n{e}")
+        return
+
+    if len(rows) <= 1:
+        update.message.reply_text("ℹ️ لا توجد أي عملية لحذفها (الجدول فارغ).")
+        return
+
+    last_row_index = len(rows)
+    last_row = rows[-1]
+
+    date_str = last_row[0] if len(last_row) > 0 else ""
+    process = last_row[1] if len(last_row) > 1 else ""
+    type_ = last_row[2] if len(last_row) > 2 else ""
+    item = last_row[3] if len(last_row) > 3 else ""
+    amount = last_row[4] if len(last_row) > 4 else ""
+    balance_value = last_row[7] if len(last_row) > 7 else ""
+
+    try:
+        sheet.delete_rows(last_row_index)
+        update.message.reply_text(
+            "↩️ تم التراجع عن آخر عملية وحذفها من Google Sheets:\n"
+            f"{date_str} | {process} | {type_} | {item or '-'} | {amount}\n"
+            f"الرصيد في الصف المحذوف كان: {balance_value}\n"
+            "إذا كان هذا الحذف بالخطأ، تحتاج تعيد إدخال العملية مرة أخرى."
+        )
+    except Exception as e:
+        print("ERROR deleting last row:", repr(e))
+        update.message.reply_text(f"❌ تعذر حذف آخر عملية:\n{e}")
+
+
+# ================== MESSAGE HANDLER ==================
+def handle_message(update, context):
+    user_id = update.message.from_user.id
+    if not authorized(update):
+        update.message.reply_text("❌ غير مصرح لك")
+        return
+
+    text = update.message.text
+    PENDING_MESSAGES[user_id] = {"text": text}
+
+    update.message.reply_text(
+        "📨 تأكيد العملية\n"
+        f"رسالتك:\n\"{text}\"\n\n"
+        "هل أنت متأكد أنك تريد حفظ هذه العملية في Google Sheets؟\n"
+        "إذا نعم، أرسل الأمر: /confirm\n"
+        "إذا لا، أرسل: /cancel"
+    )
+
+
+# ================== REPORT HELPERS ==================
+def load_expenses():
+    sheet = get_sheet()
+    rows = sheet.get_all_values()
+    expenses = []
+    for row in rows[1:]:
+        if len(row) < 5:
+            continue
+        date_str = row[0].strip()
+        process = row[1].strip() if len(row) > 1 and row[1] else ""
+        amount_str = row[4].strip()
+        if not date_str or not amount_str:
+            continue
+        try:
+            d = datetime.strptime(date_str[:10], "%Y-%m-%d").date()
+            amount = float(str(amount_str).replace(",", ""))
+        except Exception:
+            continue
+        expenses.append({"date": d, "amount": amount, "process": process})
+    return expenses
+
+
+def summarize_period(expenses, start_date, end_date):
+    income = 0.0
+    expense = 0.0
+    net = 0.0
+
+    for e in expenses:
+        if not (start_date <= e["date"] <= end_date):
+            continue
+        amt = e["amount"]
+        if e["process"] == "بيع":
+            income += amt
+            net += amt
+        else:
+            expense += amt
+            net -= amt
+
+    return round(income, 2), round(expense, 2), round(net, 2)
+
+
+# ================== REPORT COMMANDS ==================
+def week_report(update, context):
+    if not authorized(update):
+        update.message.reply_text("❌ غير مصرح لك")
+        return
+
+    expenses = load_expenses()
+    today = datetime.now().date()
+    start = today - timedelta(days=6)
+
+    income, expense, net = summarize_period(expenses, start, today)
+
+    update.message.reply_text(
+        f"📅 ملخص آخر 7 أيام (من {start} إلى {today}):\n"
+        f"الدخل: +{income}\n"
+        f"المصاريف: -{expense}\n"
+        f"الصافي: {net:+}"
+    )
+
+
+def month_report(update, context):
+    if not authorized(update):
+        update.message.reply_text("❌ غير مصرح لك")
+        return
+
+    expenses = load_expenses()
+    today = datetime.now().date()
+    start = datetime(today.year, today.month, 1).date()
+
+    income, expense, net = summarize_period(expenses, start, today)
+
+    update.message.reply_text(
+        f"📆 ملخص هذا الشهر ({today.year}-{today.month:02d}):\n"
+        f"الدخل: +{income}\n"
+        f"المصاريف: -{expense}\n"
+        f"الصافي: {net:+}"
+    )
+
+
+def status_report(update, context):
+    if not authorized(update):
+        update.message.reply_text("❌ غير مصرح لك")
+        return
+
+    expenses = load_expenses()
+    today = datetime.now().date()
+    week_start = today - timedelta(days=6)
+    month_start = datetime(today.year, today.month, 1).date()
+
+    inc_today, exp_today, net_today = summarize_period(expenses, today, today)
+    inc_week, exp_week, net_week = summarize_period(expenses, week_start, today)
+    inc_month, exp_month, net_month = summarize_period(expenses, month_start, today)
+
+    update.message.reply_text(
+        "📊 ملخص الدخل والمصاريف:\n\n"
+        f"📌 اليوم ({today}):\n"
+        f"الدخل: +{inc_today}\n"
+        f"المصاريف: -{exp_today}\n"
+        f"الصافي: {net_today:+}\n\n"
+        f"📌 آخر 7 أيام (من {week_start} إلى {today}):\n"
+        f"الدخل: +{inc_week}\n"
+        f"المصاريف: -{exp_week}\n"
+        f"الصافي: {net_week:+}\n\n"
+        f"📌 هذا الشهر ({today.year}-{today.month:02d}):\n"
+        f"الدخل: +{inc_month}\n"
+        f"المصاريف: -{exp_month}\n"
+        f"الصافي: {net_month:+}"
+    )
+
 
 # ================== MAIN ==================
-
 def main():
-    webhook_url = f"{BASE_URL}/{BOT_TOKEN}"
-    log.info("Setting Telegram webhook to %s", webhook_url)
-    updater.bot.delete_webhook()
-    updater.bot.set_webhook(webhook_url)
+    updater = Updater(BOT_TOKEN, use_context=True)
+    dp = updater.dispatcher
 
-    log.info("Starting Flask server on port %s", PORT)
-    app.run(host="0.0.0.0", port=PORT)
+    dp.add_handler(CommandHandler("start", start_command))
+    dp.add_handler(CommandHandler("help", help_command))
+    dp.add_handler(CommandHandler("cancel", cancel_command))
+    dp.add_handler(CommandHandler("confirm", confirm_command))
+    dp.add_handler(CommandHandler("balance", balance_command))
+    dp.add_handler(CommandHandler("undo", undo_command))
+    dp.add_handler(CommandHandler("week", week_report))
+    dp.add_handler(CommandHandler("month", month_report))
+    dp.add_handler(CommandHandler("status", status_report))
+    dp.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
+
+    updater.start_polling()
+    updater.idle()
+
 
 if __name__ == "__main__":
     main()
