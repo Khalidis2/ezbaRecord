@@ -1,6 +1,5 @@
+Flask==3.0.0
 python-telegram-bot==13.15
-requests
-google-auth
 gspread
+google-auth
 openai
-Flask  # not required by this snippet but ok to keep
